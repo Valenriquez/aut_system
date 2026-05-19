@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
-policy_runner.py — Run the grid-world policy on the AlphaBot2.
-Publishes Twist messages to /cmd_vel using the lab's ROS motor driver.
+policy_runner.py — Drive the AlphaBot2 through a precomputed grid policy.
+
+Expects 'policy.npy' (produced by the training script on the laptop) to be
+in the same folder as this file.
+
+Requires the lab's motor driver to be running in another SSH session:
+    cd ~/catkin_ws && source devel/setup.bash
+    roslaunch web_control web_control.launch
 """
 
+import numpy as np
 import rospy
 from geometry_msgs.msg import Twist
 
@@ -14,17 +21,7 @@ FORWARD_TIME  = 1.5    # seconds to drive one cell
 TURN_90_TIME  = 1.0    # seconds to rotate 90 degrees
 # =======================================================================
 
-# Actual optimal policy from the value iteration (0=UP, 1=DOWN, 2=LEFT, 3=RIGHT, -1=obstacle/goal)
-POLICY = [
-    [ 3,  3,  3,  3,  3,  1,  2],
-    [-1,  1, -1, -1, -1,  1, -1],
-    [ 3,  3,  3,  3,  3,  3,  1],
-    [ 0, -1, -1, -1,  0, -1,  1],
-    [ 0,  2,  1, -1,  0, -1,  1],
-    [ 0, -1,  3,  3,  0, -1,  1],
-    [ 0, -1,  0, -1,  0, -1, -1],
-]
-
+# Must match the training script
 GRID_SIZE = 7
 GOAL = (6, 6)
 OBSTACLES = {
@@ -35,10 +32,15 @@ OBSTACLES = {
     (6, 1), (6, 3), (6, 5),
 }
 
+# Actions: 0=UP, 1=DOWN, 2=LEFT, 3=RIGHT
 UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
+# Headings clockwise: 0=N, 1=E, 2=S, 3=W
 ACTION_TO_HEADING = {UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3}
 HEADING_DELTA = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
 HEADING_NAME  = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
+
+# Load the policy produced by the training script
+policy = np.load('policy.npy')
 
 rospy.init_node('policy_runner', anonymous=True)
 pub = rospy.Publisher('/cmd_vel', Twist, queue_size=10)
@@ -80,14 +82,14 @@ def in_bounds_and_free(pos):
 def main():
     rospy.sleep(1.0)
     pos = (0, 0)
-    heading = 0
+    heading = 0   # NORTH
     rospy.loginfo(f"start at {pos}, facing {HEADING_NAME[heading]}")
 
     for step in range(1, 60):
         if pos == GOAL:
             rospy.loginfo(f"*** reached goal in {step - 1} moves ***")
             return
-        action = POLICY[pos[0]][pos[1]]
+        action = int(policy[pos])
         if action == -1:
             rospy.logwarn(f"no action at {pos}, stopping")
             return

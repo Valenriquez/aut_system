@@ -1,4 +1,5 @@
 #### Decision making - Autonomous systems - Real repository
+- print: https://docs.google.com/document/d/1HHvDfez3BF-KAHr0Z_45H-KygH6nSYnAQoJ15cPIrlE/edit?usp=sharing
 
 #### 20-MAY-2026
 .65: not working
@@ -32,3 +33,4 @@ ros2 topic pub --rate 1 /alphabot2/cmd_vel geometry_msgs/msg/Twist "{linear: {x:
 ros2 topic echo /image/compressed
 #### To see the camera feed, run on the laptop/Lab computer
 ros2 run rqt_image_view rqt_image_view
+

@@ -16,7 +16,7 @@
 2) ssh deec@10.16.140.xx
 3) password: deecrobots
 
-##### Transfering files
+##### Transfering files (OPEN TERMINAL NOT INSIDE THE SSH, BUT NORMAL LINUX TERMINAL)
 1) scp file.py deec@10.16.140.xx:~/
 2) password: deecrobots
 

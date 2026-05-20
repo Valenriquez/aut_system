@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
+import time
 import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
@@ -13,7 +15,9 @@ TURN_90_TIME  = 1.0
 # =======================================================================
 
 GRID_SIZE = 7
+
 GOAL = (6, 6)
+
 OBSTACLES = {
     (1, 0), (1, 2), (1, 3), (1, 4), (1, 6),
     (3, 1), (3, 2), (3, 3), (3, 5),
@@ -22,15 +26,33 @@ OBSTACLES = {
     (6, 1), (6, 3), (6, 5),
 }
 
+# Actions
 UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
-ACTION_TO_HEADING = {UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3}
-HEADING_DELTA = {
-    0: (-1, 0),
-    1: (0, 1),
-    2: (1, 0),
-    3: (0, -1)
+
+# Headings clockwise
+ACTION_TO_HEADING = {
+    UP: 0,
+    RIGHT: 1,
+    DOWN: 2,
+    LEFT: 3
 }
-HEADING_NAME = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
+
+HEADING_DELTA = {
+    0: (-1, 0),   # N
+    1: (0, 1),    # E
+    2: (1, 0),    # S
+    3: (0, -1),   # W
+}
+
+HEADING_NAME = {
+    0: 'N',
+    1: 'E',
+    2: 'S',
+    3: 'W'
+}
+
+# Load policy
+policy = np.load('policy.npy')
 
 
 class PolicyRunner(Node):
@@ -38,114 +60,135 @@ class PolicyRunner(Node):
     def __init__(self):
         super().__init__('policy_runner')
 
-        self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.rate_hz = 10
+        self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
 
-        self.policy = np.load('policy.npy')
+    def publish_twist(self, linear_x, angular_z, duration):
 
-        self.timer = self.create_timer(0.1, self.loop)  # 10 Hz
-
-        self.pos = (0, 0)
-        self.heading = 0
-        self.step = 0
-        self.done = False
-
-        self.get_logger().info(f"start at {self.pos}, facing {HEADING_NAME[self.heading]}")
-
-    # ---------------- movement helper ----------------
-
-    def publish(self, linear_x=0.0, angular_z=0.0):
         msg = Twist()
-        msg.linear.x = float(linear_x)
-        msg.angular.z = float(angular_z)
-        self.pub.publish(msg)
+        msg.linear.x = linear_x
+        msg.angular.z = angular_z
 
-    def stop(self):
+        end_time = time.time() + duration
+
+        while time.time() < end_time:
+
+            self.pub.publish(msg)
+            time.sleep(0.1)
+
+        # stop robot
         self.pub.publish(Twist())
+        time.sleep(0.3)
 
-    # ---------------- logic helpers ----------------
+    def face(self, current, desired):
 
-    def face(self, desired):
-        diff = (desired - self.heading) % 4
+        diff = (desired - current) % 4
 
         if diff == 0:
             return desired
 
-        msg = Twist()
-
         if diff == 1:
-            msg.angular.z = -ANGULAR_SPEED
+            # right
+            self.publish_twist(0.0, -ANGULAR_SPEED, TURN_90_TIME)
+
         elif diff == 2:
-            msg.angular.z = -ANGULAR_SPEED
+            # 180
+            self.publish_twist(0.0, -ANGULAR_SPEED, 2 * TURN_90_TIME)
+
         else:
-            msg.angular.z = ANGULAR_SPEED
+            # left
+            self.publish_twist(0.0, ANGULAR_SPEED, TURN_90_TIME)
 
-        duration = TURN_90_TIME * (2 if diff == 2 else 1)
-
-        end_time = self.get_clock().now().seconds_nanoseconds()[0] + duration
-
-        while self.get_clock().now().seconds_nanoseconds()[0] < end_time:
-            self.pub.publish(msg)
-
-        self.stop()
         return desired
 
     def in_bounds_and_free(self, pos):
+
         r, c = pos
-        return (0 <= r < GRID_SIZE and
-                0 <= c < GRID_SIZE and
-                pos not in OBSTACLES)
 
-    # ---------------- main loop ----------------
+        return (
+            0 <= r < GRID_SIZE and
+            0 <= c < GRID_SIZE and
+            pos not in OBSTACLES
+        )
 
-    def loop(self):
-        if self.done:
-            return
+    def run(self):
 
-        if self.pos == GOAL:
-            self.get_logger().info(f"*** reached goal in {self.step} moves ***")
-            self.stop()
-            self.done = True
-            return
+        time.sleep(1.0)
 
-        self.step += 1
+        pos = (0, 0)
+        heading = 0
 
-        action = int(self.policy[self.pos])
+        self.get_logger().info(
+            f"start at {pos}, facing {HEADING_NAME[heading]}"
+        )
 
-        if action == -1:
-            self.get_logger().warn(f"no action at {self.pos}, stopping")
-            self.done = True
-            return
+        for step in range(1, 60):
 
-        desired_heading = ACTION_TO_HEADING[action]
-        self.heading = self.face(desired_heading)
+            if pos == GOAL:
 
-        dr, dc = HEADING_DELTA[self.heading]
-        target = (self.pos[0] + dr, self.pos[1] + dc)
+                self.get_logger().info(
+                    f"*** reached goal in {step - 1} moves ***"
+                )
+                return
 
-        if self.in_bounds_and_free(target):
-            self.publish(LINEAR_SPEED, 0.0)
-            self.pos = target
-            self.get_logger().info(
-                f"step {self.step}: -> {self.pos}, facing {HEADING_NAME[self.heading]}"
+            action = int(policy[pos])
+
+            if action == -1:
+
+                self.get_logger().warn(
+                    f"no action at {pos}, stopping"
+                )
+                return
+
+            heading = self.face(
+                heading,
+                ACTION_TO_HEADING[action]
             )
-        else:
-            self.get_logger().info(
-                f"step {self.step}: bounce (stayed at {self.pos})"
+
+            dr, dc = HEADING_DELTA[heading]
+
+            target = (
+                pos[0] + dr,
+                pos[1] + dc
             )
+
+            if self.in_bounds_and_free(target):
+
+                self.publish_twist(
+                    LINEAR_SPEED,
+                    0.0,
+                    FORWARD_TIME
+                )
+
+                pos = target
+
+                self.get_logger().info(
+                    f"step {step:2d}: -> {pos}, "
+                    f"facing {HEADING_NAME[heading]}"
+                )
+
+            else:
+
+                self.get_logger().info(
+                    f"step {step:2d}: bounce "
+                    f"(stayed at {pos})"
+                )
 
 
 def main():
+
     rclpy.init()
+
     node = PolicyRunner()
 
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        node.run()
+
     finally:
-        node.stop()
+
+        node.pub.publish(Twist())
+
         node.destroy_node()
+
         rclpy.shutdown()
 
 

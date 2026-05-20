@@ -9,11 +9,13 @@ GRID_SIZE = 7
 GAMMA = 0.9
 THETA = 0.001
 
+# Rewards (as per spec)
 STEP_REWARD = -1
 GOAL_REWARD = 100
 
+# Stochastic transition probabilities (as per spec)
 P_INTENDED = 0.8
-P_DRIFT = 0.1
+P_DRIFT = 0.1  # to each perpendicular side
 
 # ============================================
 # ACTIONS
@@ -30,6 +32,7 @@ ACTIONS = {
 
 ACTION_SYMBOLS = {UP: '^', DOWN: 'v', LEFT: '<', RIGHT: '>'}
 
+# For each action, the two perpendicular ("drift") actions
 PERPENDICULAR = {
     UP:    (LEFT, RIGHT),
     DOWN:  (LEFT, RIGHT),
@@ -38,7 +41,7 @@ PERPENDICULAR = {
 }
 
 # ============================================
-# WORLD
+# WORLD DEFINITION
 # ============================================
 
 goal_state = (6, 6)
@@ -67,6 +70,7 @@ def is_valid_state(state):
 
 
 def move(state, action):
+    """Deterministic move in `action` direction. Bounces back if blocked."""
     dr, dc = ACTIONS[action]
     next_state = (state[0] + dr, state[1] + dc)
     if not is_valid_state(next_state):
@@ -81,18 +85,30 @@ def get_reward(next_state):
 
 
 def get_transitions(state, action):
+    """
+    Returns the stochastic transitions for taking `action` from `state`.
+    Each element is (probability, next_state, reward).
+
+      - 0.8: intended direction
+      - 0.1: drift to one perpendicular side
+      - 0.1: drift to the other perpendicular side
+    """
     transitions = []
+
     ns_intended = move(state, action)
     transitions.append((P_INTENDED, ns_intended, get_reward(ns_intended)))
+
     drift_a, drift_b = PERPENDICULAR[action]
     ns_a = move(state, drift_a)
     transitions.append((P_DRIFT, ns_a, get_reward(ns_a)))
     ns_b = move(state, drift_b)
     transitions.append((P_DRIFT, ns_b, get_reward(ns_b)))
+
     return transitions
 
 
 def expected_action_value(state, action, V):
+    """Expected value E[r + gamma * V(s')] under stochastic transitions."""
     total = 0.0
     for prob, next_state, reward in get_transitions(state, action):
         total += prob * (reward + GAMMA * V[next_state])
@@ -100,7 +116,7 @@ def expected_action_value(state, action, V):
 
 
 # ============================================
-# VALUE ITERATION
+# VALUE ITERATION (stochastic Bellman update)
 # ============================================
 
 V = np.zeros((GRID_SIZE, GRID_SIZE))
@@ -110,15 +126,18 @@ iteration = 0
 while True:
     delta = 0
     new_V = np.copy(V)
+
     for row in range(GRID_SIZE):
         for col in range(GRID_SIZE):
             state = (row, col)
             if state in obstacles or state == goal_state:
                 continue
+
             action_values = [expected_action_value(state, a, V) for a in ACTIONS]
             best = max(action_values)
             new_V[state] = best
             delta = max(delta, abs(V[state] - best))
+
     V = new_V
     iteration += 1
     if delta < THETA:
@@ -127,7 +146,7 @@ while True:
 print(f"Converged after {iteration} iterations")
 
 # ============================================
-# EXTRACT POLICY
+# EXTRACT POLICY (greedy w.r.t. expected value)
 # ============================================
 
 for row in range(GRID_SIZE):
@@ -161,21 +180,13 @@ for row in range(GRID_SIZE):
 
 
 # ============================================
-# SAVE / PRINT POLICY FOR THE ROBOT
-# ============================================
-
-np.save('policy.npy', policy)
-
-print("\n========== COPY THIS INTO policy_runner.py ==========")
-print("POLICY = " + repr(policy.tolist()))
-print("=====================================================\n")
-
-
-# ============================================
 # MICROSIMULATION
 # ============================================
+# Roll out the learned policy in the stochastic environment.
+# At each step we sample which direction actually happens.
 
 def step_stochastic(state, action, rng):
+    """Sample an actual next state given the intended action."""
     r = rng.random()
     if r < P_INTENDED:
         actual = action
@@ -187,6 +198,7 @@ def step_stochastic(state, action, rng):
 
 
 def run_episode(start, policy, rng, max_steps=200):
+    """Run one episode. Returns (trajectory, total_reward, reached_goal)."""
     state = start
     trajectory = [state]
     total_reward = 0
@@ -230,6 +242,7 @@ if steps_to_goal:
 
 fig, axes = plt.subplots(1, 2, figsize=(16, 7))
 
+# --- Left panel: value function + policy arrows ---
 ax = axes[0]
 ax.imshow(V, cmap='viridis')
 for row in range(GRID_SIZE):
@@ -246,6 +259,7 @@ ax.set_title("Value Function + Optimal Policy\n(stochastic 0.8 / 0.1 / 0.1)")
 ax.set_xticks(range(GRID_SIZE))
 ax.set_yticks(range(GRID_SIZE))
 
+# --- Right panel: visit heatmap + sample trajectories ---
 ax = axes[1]
 visit_count = np.zeros((GRID_SIZE, GRID_SIZE))
 for traj in trajectories:
@@ -254,6 +268,7 @@ for traj in trajectories:
 
 ax.imshow(visit_count, cmap='hot')
 
+# Overlay 10 trajectories (with small jitter so overlapping lines are visible)
 for i, traj in enumerate(trajectories[:10]):
     ys = [s[0] + rng.normal(0, 0.06) for s in traj]
     xs = [s[1] + rng.normal(0, 0.06) for s in traj]
@@ -272,5 +287,5 @@ ax.set_xticks(range(GRID_SIZE))
 ax.set_yticks(range(GRID_SIZE))
 
 plt.tight_layout()
-plt.savefig('value_iter_stochastic.png', dpi=110, bbox_inches='tight')
+plt.savefig('/home/claude/value_iter_stochastic.png', dpi=110, bbox_inches='tight')
 plt.show()

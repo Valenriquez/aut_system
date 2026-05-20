@@ -28,4 +28,7 @@
 ros2 topic pub --rate 1 /alphabot2/cmd_vel geometry_msgs/msg/Twist "{linear: {x:
 1.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 5.0}}" ros2 run teleop_twist_keyboard teleop_twist_keyboard 
 
-#### 
+#### Topics to query
+ros2 topic echo /image/compressed
+#### To see the camera feed, run on the laptop/Lab computer
+ros2 run rqt_image_view rqt_image_view

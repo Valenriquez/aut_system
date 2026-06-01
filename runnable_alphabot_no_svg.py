@@ -93,7 +93,6 @@ def compute_policy_path(pol, start, goal, max_len=200):
         pos = nxt
     return path
 
-
 class PolicyRunner(Node):
     def __init__(self):
         super().__init__('policy_runner')
@@ -102,9 +101,7 @@ class PolicyRunner(Node):
             "MOTION-ONLY test: publishing Twist on /alphabot2/cmd_vel "
             "(no camera / no ArUco localization)"
         )
-
     # ---------- motion ----------
-
     def publish_twist(self, linear_x, angular_z, duration):
         msg = Twist()
         msg.linear.x = linear_x
@@ -130,11 +127,9 @@ class PolicyRunner(Node):
 
     def in_bounds_and_free(self, pos):
         r, c = pos
-        return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
-                and pos not in OBSTACLES)
+        return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE and pos not in OBSTACLES)
 
     # ---------- main loop ----------
-
     def run(self):
         time.sleep(1.0)
         pos = START
@@ -173,10 +168,10 @@ def main():
     print(f"[policy_runner] policy path ({len(path)} cells): {path}")
     print("[policy_runner] the robot will dead-reckon this path open-loop")
 
-    rclpy.init()
-    node = PolicyRunner()
+    rclpy.init()  # Starts ROS 2 (initializes the ROS client library)
+    node = PolicyRunner() # run de instance Creates an instance of your class PolicyRunner.
     try:
-        node.run()
+        PolicyRunner.run(node) # “Go execute the run() function defined inside PolicyRunner.”
     finally:
         node.pub.publish(Twist())   # make sure the robot is stopped
         node.destroy_node()

@@ -38,9 +38,12 @@ WEIGHTS        = [-2, -1, 0, 1, 2]   # REVERTED (v5's flip was wrong)
 ON_LINE_COUNT  = 3      # >=3 sensors on black -> on a line
 OFF_LINE_COUNT = 1      # <=1 sensor on black  -> in white (off the line)
 
-# ── LINE-LOSS RECOVERY ───────────────────────────────────────
-RECOVERY_TURN     = 0.6    # rad/s  turn rate while line is lost
-RECOVERY_FWD_FRAC = 0.4    # fraction of forward speed kept while searching
+# ── DISCRETE STEERING ────────────────────────────────────────
+# Turn rate applied when the black line is off to one side.
+# Per your sensor mapping: black on high-index side -> LEFT.
+STEER_LEFT  = +0.6    # rad/s  (positive = left / CCW in ROS)
+STEER_RIGHT = -0.6    # rad/s  (negative = right / CW)
+# If the robot turns the WRONG way on the bench, swap these two signs.
 
 # ===================== MOTION TUNING ========================
 CELL_SIZE     = 0.18        # m  <- MEASURE intersection-to-intersection pitch
@@ -140,6 +143,38 @@ class PolicyRunner(Node):
             return None
         return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
+    def _steer(self) -> float:
+        """
+        Discrete steering from the black/white pattern.
+
+          centered  (>=3 black, e.g. [W,B,B,B,W])  -> straight
+          black on the higher-index side           -> turn LEFT
+          black on the lower-index side            -> turn RIGHT
+          no black at all                          -> straight
+                                                      (find the next line,
+                                                       no turn-hunting)
+        """
+        b = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
+        count = sum(b)
+
+        # no line: drive straight to reach the next black line
+        if count == 0:
+            return 0.0
+
+        # well-centered on the line: straight
+        if count >= ON_LINE_COUNT:
+            return 0.0
+
+        # off to one side: compare which half holds the black
+        left_side  = b[3] + b[4]   # higher-index sensors  -> "left" per your spec
+        right_side = b[0] + b[1]   # lower-index sensors   -> "right" per your spec
+
+        if left_side > right_side:
+            return STEER_LEFT
+        if right_side > left_side:
+            return STEER_RIGHT
+        return 0.0                 # tie / only center sensor -> straight
+
     # ── primitives ─────────────────────────────────
     def _stop(self):
         self.pub.publish(Twist())
@@ -156,9 +191,9 @@ class PolicyRunner(Node):
 
     def _drive_one_cell(self, linear_speed: float, expected_cell=None):
         """
-        Timing-primary, line-re-anchored, WITH line-loss recovery.
-        While on the line: proportional steer (reverted sign).
-        While off the line: arc back toward the last-seen side.
+        Timing-primary, line-re-anchored, with discrete steering.
+        On the line: straight / left / right per the black pattern.
+        Line lost: go straight to reach the next black line (no turning).
         """
         real_speed = REAL_SPEED.get(linear_speed, linear_speed)
         expected   = CELL_SIZE / real_speed
@@ -168,7 +203,6 @@ class PolicyRunner(Node):
         start            = time.time()
         prev_on          = self._on_line
         seen_white_after = False
-        last_error       = 0.0     # remembers which side the line was on
 
         self.get_logger().info(
             f'  [drive] -> {expected_cell}  real={real_speed:.3f}  '
@@ -204,17 +238,9 @@ class PolicyRunner(Node):
                 )
                 break
 
-            error = self._line_error()
             cmd = Twist()
-            if error is not None:
-                # ON the line: proportional steering
-                last_error    = error
-                cmd.linear.x  = linear_speed
-                cmd.angular.z = -KP * error
-            else:
-                # LINE LOST: arc back toward the last-seen side
-                cmd.linear.x  = linear_speed * RECOVERY_FWD_FRAC
-                cmd.angular.z = -RECOVERY_TURN * (1.0 if last_error >= 0 else -1.0)
+            cmd.linear.x  = linear_speed
+            cmd.angular.z = self._steer()   # discrete: straight / left / right
             self.pub.publish(cmd)
 
             prev_on = on

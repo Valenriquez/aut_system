@@ -1,31 +1,25 @@
 #!/usr/bin/env python3
 """
-policy_runner_variant_B.py  –  AlphaBot2 (ROS 2 Humble)
+policy_runner_v5.py  –  AlphaBot2 (ROS 2 Humble)
 
-STRATEGY: Debounced detection + post-turn heading correction.
+Corrected from Variant A. Three fixes:
 
-Two additions over grid_maze.py:
+  1. STEERING SIGN FLIPPED
+     WEIGHTS is now [2, 1, 0, -1, -2] (was [-2,-1,0,1,2]).
+     The robot was steering AWAY from the line ("escaping"); the
+     correction direction was inverted for this sensor mounting.
+     Now `angular.z = -KP*error` pushes back ONTO the line.
 
-  1. DEBOUNCED CHECKPOINT DETECTION
-     A single noisy reading cannot trigger a checkpoint.
-     The robot must see ≥ ON_LINE_COUNT sensors on black for
-     DEBOUNCE_HITS consecutive sensor callbacks before the
-     checkpoint is accepted.  This eliminates false stops on
-     tape edges, reflections, and sensor glitches.
+  2. HIGHER SPEEDS (above motor deadband)
+     0.07 m/s was likely below the AlphaBot2's minimum PWM, so the
+     wheels buzzed without turning. Floored well above that.
 
-  2. POST-TURN HEADING CORRECTION  (re-align to line after every turn)
-     After each rotation the robot's heading has a small error from
-     motor speed mismatch.  This accumulates across multiple turns
-     and causes the robot to approach cell lines at an angle,
-     triggering only 1-2 sensors instead of all 5.
-     Fix: after every turn, creep forward slowly until the sensor
-     array detects the nearest line, then rotate in small increments
-     until the error signal is minimised (robot centred and square
-     to the line).  Only then does the main forward move begin.
-
-Failure mode this fixes:
-  Heading drift causes missed checkpoints → robot overshoots cells.
-  Noisy sensors cause early stops mid-cell.
+  3. TIMING-PRIMARY + RISING-EDGE RE-ANCHOR (line sensors only)
+     The timer decides expected arrival. On a GAPPED move (cross
+     white, then a new line) the rising edge into that line is
+     ground truth -> stop there (kills along-track drift). On a
+     CONTINUOUS-tape move (never goes white) no edge fires and the
+     timer stops it. Sensors also steer the whole time.
 
 Topics
   subscribe : /alphabot2/line_sensors  (std_msgs/msg/Int32MultiArray)
@@ -41,37 +35,38 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray
 from geometry_msgs.msg import Twist
+from rclpy.qos import qos_profile_sensor_data
+
 
 # ===================== IR SENSOR TUNING =====================
-THRESHOLD     = 700
-KP            = 0.30
-WEIGHTS       = [-2, -1, 0, 1, 2]
-ON_LINE_COUNT = 3      # ≥3 sensors on black → on line
-OFF_LINE_COUNT = 1     # ≤1 sensor on black  → fully in white cell
-
-# ── DEBOUNCE ─────────────────────────────────────────────────
-# How many consecutive on-line callbacks required to accept a checkpoint.
-# Raise if you get false stops; lower if the robot overshoots.
-DEBOUNCE_HITS = 4
-
-# ── POST-TURN ALIGNMENT ──────────────────────────────────────
-# After a turn, creep forward at this speed looking for the current line.
-ALIGN_CREEP_SPEED   = 0.05   # m/s  (very slow)
-ALIGN_ROTATE_SPEED  = 0.20   # rad/s (gentle nudge)
-ALIGN_MAX_TIME      = 2.0    # s  give up if line not found
-# Error magnitude below which heading is considered "square"
-ALIGN_ERROR_THRESH  = 0.4    # out of [-2, +2]
+THRESHOLD      = 700
+KP             = 0.30
+WEIGHTS        = [2, 1, 0, -1, -2]   # FLIPPED: fixes "escaping the line"
+ON_LINE_COUNT  = 3      # >=3 sensors on black -> on a line
+OFF_LINE_COUNT = 1      # <=1 sensor on black  -> in white (off the line)
 
 # ===================== MOTION TUNING ========================
-CELL_SIZE     = 0.18
+CELL_SIZE     = 0.18        # m  <- MEASURE intersection-to-intersection pitch
 QUARTER_TURN  = math.pi / 2
 
-FAST_LINEAR   = 0.12
-SLOW_LINEAR   = 0.07
-ANGULAR_SPEED = 0.70
-SETTLE_TIME   = 0.5
+# Raised above the deadband. If it still won't move, raise further.
+FAST_LINEAR   = 0.18        # m/s  straightaways
+SLOW_LINEAR   = 0.12        # m/s  cell before a turn / goal
+ANGULAR_SPEED = 0.80        # rad/s
+SETTLE_TIME   = 0.4         # s    pause after each primitive
 
-MAX_CELL_TIME = CELL_SIZE / SLOW_LINEAR + 3.0
+# Measured REAL ground speeds (m/s) for each commanded speed.
+# Until you calibrate, these fall back to the commanded value, so the
+# timer will be approximate. To calibrate: command a speed for 5 s,
+# tape-measure the distance, real = distance / 5, put it here.
+REAL_SPEED = {
+    # FAST_LINEAR: 0.14,   # <- fill in from a calibration drive
+    # SLOW_LINEAR: 0.095,  # <- fill in from a calibration drive
+}
+
+ARRIVE_GATE_FRAC = 0.5      # ignore line crossings for first half of the move
+ARRIVE_GRACE     = 0.4      # extra seconds allowed past expected to catch
+                            # a slightly-late edge on a gapped move
 
 # ===================== GRID / WORLD =========================
 GRID_SIZE = 7
@@ -119,45 +114,30 @@ def compute_policy_path(pol, start, goal, max_len=200):
 class PolicyRunner(Node):
 
     def __init__(self):
-        super().__init__('policy_runner_B')
+        super().__init__('policy_runner_v5')
         self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
         self.sub = self.create_subscription(
             Int32MultiArray,
             '/alphabot2/line_sensors',
-            self._sensor_cb, 10,
+            self._sensor_cb,
+            qos_profile_sensor_data,   # match typical BEST_EFFORT sensor publisher
         )
-        self._sensor_data    = [999, 999, 999, 999, 999]
-        self._on_line_count  = 0     # consecutive on-line callbacks
-        self._off_line_count = 0     # consecutive off-line callbacks
+        self._sensor_data = [999, 999, 999, 999, 999]
+        self._count       = 0
+        self._on_line     = False
+        self.get_logger().info('PolicyRunner v5 ready')
 
-        # debounced flags (updated in callback)
-        self._debounced_on_line  = False
-        self._debounced_off_line = True
-
-        self.get_logger().info(
-            'Variant B ready  —  debounced detection + post-turn alignment'
-        )
-
-    # ──────────────────────────────────────────────
-    # SENSOR CALLBACK
-    # ──────────────────────────────────────────────
-
+    # ── sensing ────────────────────────────────────
     def _sensor_cb(self, msg: Int32MultiArray):
         if len(msg.data) != 5:
             return
         self._sensor_data = list(msg.data)
-        count = sum(1 for v in self._sensor_data if v < THRESHOLD)
-
-        # ── debounce ON_LINE ────────────────────────
-        if count >= ON_LINE_COUNT:
-            self._on_line_count  += 1
-            self._off_line_count  = 0
-        else:
-            self._off_line_count += 1
-            self._on_line_count   = 0
-
-        self._debounced_on_line  = self._on_line_count  >= DEBOUNCE_HITS
-        self._debounced_off_line = self._off_line_count >= DEBOUNCE_HITS
+        self._count   = sum(1 for v in self._sensor_data if v < THRESHOLD)
+        self._on_line = self._count >= ON_LINE_COUNT
+        self.get_logger().info(
+            f'raw={self._sensor_data} count={self._count}',
+            throttle_duration_sec=0.5,
+        )
 
     def _line_error(self):
         binary = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
@@ -166,16 +146,7 @@ class PolicyRunner(Node):
             return None
         return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
-    def _reset_debounce(self):
-        self._on_line_count      = 0
-        self._off_line_count     = 0
-        self._debounced_on_line  = False
-        self._debounced_off_line = False
-
-    # ──────────────────────────────────────────────
-    # MOTION PRIMITIVES
-    # ──────────────────────────────────────────────
-
+    # ── primitives ─────────────────────────────────
     def _stop(self):
         self.pub.publish(Twist())
 
@@ -189,94 +160,69 @@ class PolicyRunner(Node):
         self._stop()
         time.sleep(SETTLE_TIME)
 
-    def _align_to_line(self):
+    def _drive_one_cell(self, linear_speed: float, expected_cell=None):
         """
-        Post-turn heading correction.
-        Step 1: creep forward until sensors detect the current cell line.
-        Step 2: rotate slowly until the lateral error is near zero
-                (robot is square to the tape line).
-        This corrects the small heading error left after each timed turn.
+        Timing-primary, line-re-anchored cell traversal.
+
+        - GAPPED move: rising edge (white -> line) is ground truth -> stop.
+        - CONTINUOUS-tape move: no edge -> timer stops it.
+        - Sensors steer the whole time (corrected sign).
         """
-        self.get_logger().info('  [B] aligning to line after turn...')
-        end = time.time() + ALIGN_MAX_TIME
+        real_speed = REAL_SPEED.get(linear_speed, linear_speed)
+        expected   = CELL_SIZE / real_speed
+        gate_time  = expected * ARRIVE_GATE_FRAC
+        hard_time  = expected + ARRIVE_GRACE
 
-        # ── Step 1: find the line ──────────────────
-        while time.time() < end:
-            rclpy.spin_once(self, timeout_sec=0.04)
-            if self._debounced_on_line:
-                self._stop()
-                self.get_logger().info('  [B] line found for alignment')
-                break
-            cmd = Twist()
-            cmd.linear.x = ALIGN_CREEP_SPEED
-            self.pub.publish(cmd)
-        else:
-            self._stop()
-            self.get_logger().warn('  [B] alignment creep timed out')
-            return
-
-        # ── Step 2: rotate until centred ──────────
-        align_end = time.time() + 1.5   # max 1.5 s of nudging
-        while time.time() < align_end:
-            rclpy.spin_once(self, timeout_sec=0.04)
-            error = self._line_error()
-            if error is None:
-                break
-            if abs(error) < ALIGN_ERROR_THRESH:
-                self.get_logger().info(
-                    f'  [B] aligned  error={error:.2f}'
-                )
-                break
-            cmd = Twist()
-            cmd.linear.x  = 0.0
-            cmd.angular.z = -ALIGN_ROTATE_SPEED * (1 if error > 0 else -1)
-            self.pub.publish(cmd)
-
-        self._stop()
-        time.sleep(SETTLE_TIME)
-
-    def _drive_to_next_line(self, linear_speed: float, expected_cell=None):
-        """
-        Two-phase forward drive with DEBOUNCED checkpoint detection.
-        Phase 1 DEPARTING: drive until sensors are debounce-confirmed OFF line.
-        Phase 2 SEEKING:   drive until sensors are debounce-confirmed ON line.
-        """
-        self._reset_debounce()
-        phase = 'DEPARTING'
-        end   = time.time() + MAX_CELL_TIME
+        start            = time.time()
+        prev_on          = self._on_line
+        seen_white_after = False
 
         self.get_logger().info(
-            f'  [B] driving to {expected_cell}  phase=DEPARTING'
+            f'  [drive] -> {expected_cell}  real={real_speed:.3f}  '
+            f'expected={expected:.2f}s'
         )
 
-        while time.time() < end:
+        while True:
+            elapsed = time.time() - start
+            on  = self._on_line
+            off = self._count <= OFF_LINE_COUNT
+
+            if elapsed >= gate_time:
+                if off:
+                    seen_white_after = True
+                if seen_white_after and on and not prev_on:
+                    self.get_logger().info(
+                        f'  [drive] line edge at {elapsed:.2f}s '
+                        f'-> {expected_cell} (re-anchored)'
+                    )
+                    break
+
+            if elapsed >= expected and not seen_white_after:
+                self.get_logger().info(
+                    f'  [drive] timer at {elapsed:.2f}s '
+                    f'-> {expected_cell} (continuous tape, dead-reckoned)'
+                )
+                break
+
+            if elapsed >= hard_time:
+                self.get_logger().warn(
+                    f'  [drive] hard cap at {elapsed:.2f}s '
+                    f'-> {expected_cell} (dead-reckoned)'
+                )
+                break
+
+            prev_on = on
             error = self._line_error()
-            cmd   = Twist()
+            cmd = Twist()
             cmd.linear.x  = linear_speed
             cmd.angular.z = (-KP * error) if error is not None else 0.0
             self.pub.publish(cmd)
             rclpy.spin_once(self, timeout_sec=0.04)
 
-            if phase == 'DEPARTING':
-                if self._debounced_off_line:
-                    phase = 'SEEKING'
-                    self._reset_debounce()
-                    self.get_logger().info('  [B] phase=SEEKING')
-
-            elif phase == 'SEEKING':
-                if self._debounced_on_line:
-                    self.get_logger().info(
-                        f'  [B] debounced checkpoint → {expected_cell}'
-                    )
-                    break
-        else:
-            self.get_logger().warn('  [B] timed out — dead-reckoning')
-
         self._stop()
         time.sleep(SETTLE_TIME)
 
-    def face(self, current: int, desired: int, do_align: bool = False) -> int:
-        """Rotate to face desired heading; optionally align to line after."""
+    def face(self, current: int, desired: int) -> int:
         diff = (desired - current) % 4
         if diff == 0:
             return desired
@@ -287,14 +233,9 @@ class PolicyRunner(Node):
             self._rotate(-ANGULAR_SPEED, 2 * dur)
         else:
             self._rotate(+ANGULAR_SPEED, dur)
-        if do_align:
-            self._align_to_line()
         return desired
 
-    # ──────────────────────────────────────────────
-    # POLICY HELPERS
-    # ──────────────────────────────────────────────
-
+    # ── policy helpers ─────────────────────────────
     def _in_bounds_and_free(self, pos) -> bool:
         r, c = pos
         return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
@@ -308,16 +249,11 @@ class PolicyRunner(Node):
             return True
         return na != int(policy[cur])
 
-    # ──────────────────────────────────────────────
-    # MAIN LOOP
-    # ──────────────────────────────────────────────
-
+    # ── main loop ──────────────────────────────────
     def run(self):
         time.sleep(1.5)
         pos, heading = START, 0
-        self.get_logger().info(
-            f'Start {pos}  heading {HEADING_NAME[heading]}'
-        )
+        self.get_logger().info(f'Start {pos}  heading {HEADING_NAME[heading]}')
 
         for step in range(1, 100):
             if pos == GOAL:
@@ -329,14 +265,9 @@ class PolicyRunner(Node):
                 self.get_logger().warn(f'No action at {pos}')
                 return
 
-            desired_heading = ACTION_TO_HEADING[action]
-            turn_needed     = (desired_heading - heading) % 4 != 0
-
-            # post-turn alignment only when we actually rotate
-            heading = self.face(heading, desired_heading, do_align=turn_needed)
-
-            dr, dc = HEADING_DELTA[heading]
-            target = (pos[0] + dr, pos[1] + dc)
+            heading = self.face(heading, ACTION_TO_HEADING[action])
+            dr, dc  = HEADING_DELTA[heading]
+            target  = (pos[0] + dr, pos[1] + dc)
 
             if not self._in_bounds_and_free(target):
                 self.get_logger().warn(f'Obstacle at {target}')
@@ -345,11 +276,11 @@ class PolicyRunner(Node):
             linear = SLOW_LINEAR if self._turn_coming(pos, target) else FAST_LINEAR
             tag    = 'slow' if linear == SLOW_LINEAR else 'fast'
             self.get_logger().info(
-                f'step {step:2d}: {pos} → {target}  '
+                f'step {step:2d}: {pos} -> {target}  '
                 f'{HEADING_NAME[heading]}  ({tag})'
             )
 
-            self._drive_to_next_line(linear, expected_cell=target)
+            self._drive_one_cell(linear, expected_cell=target)
             pos = target
 
         self.get_logger().warn('Step limit reached.')
@@ -357,7 +288,7 @@ class PolicyRunner(Node):
 
 def main():
     path = compute_policy_path(policy, START, GOAL)
-    print(f'[variant B] path ({len(path)} cells): {path}')
+    print(f'[v5] path ({len(path)} cells): {path}')
     rclpy.init()
     node = PolicyRunner()
     try:

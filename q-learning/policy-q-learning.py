@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-""" 
-AlphaBot2 (ROS 2 Humble)
-Built specifically for a maze where black tape marks EVERY cell boundary
-(i.e. the grid lines are always visible at the start AND end of each move).
+"""
+AlphaBot2 (ROS 2 Humble) — Q-LEARNING POLICY RUNNER
 
-The key fix over previous versions:
-  Two-phase checkpoint detection:
-    Phase 1: wait for sensors to go WHITE  (robot left the starting line)
-    Phase 2: wait for sensors to go BLACK  (robot reached the next cell line)
-  Without this, the robot fires a checkpoint immediately on every move
-  because it starts each step already sitting on a black tape line.
+Identical motion / sensor stack to your value-iteration version. The ONLY
+change is the source of `policy`: instead of being hand-coded, it is the
+greedy policy learned offline by `qlearning_train.py` and saved to
+`learned_policy.npy`.
+
+Run order:
+  1.  python3 qlearning_train.py      # learn + save learned_policy.npy
+  2.  ros2 run <pkg> policy_runner_qlearning   (or python3 this file)
+
+Two-phase checkpoint detection (white-then-black) is unchanged — the line
+sensors only ever execute the converged policy, never learn on hardware.
 
 Topics
   subscribe : /alphabot2/line_sensors  (std_msgs/msg/Int32MultiArray)
   publish   : /alphabot2/cmd_vel       (geometry_msgs/msg/Twist)
 """
 
+import os
 import time
 import math
 import numpy as np
@@ -30,20 +34,18 @@ THRESHOLD  = 700     # below → on black line
 KP         = 0.30    # proportional lateral steering gain
 WEIGHTS    = [-2, -1, 0, 1, 2]
 
-# how many sensors must be on black to count as "on line"
-ON_LINE_COUNT  = 3   # ≥3 sensors on black → on line
-OFF_LINE_COUNT = 1   # ≤1 sensor on black  → fully off line (white cell)
+ON_LINE_COUNT  = 3   # >=3 sensors on black → on line
+OFF_LINE_COUNT = 1   # <=1 sensor on black  → fully off line (white cell)
 
 # ===================== MOTION TUNING ========================
-CELL_SIZE     = 0.18        # m  ← MEASURE YOUR PHYSICAL CELLS and set this
-QUARTER_TURN  = math.pi / 2 # rad
+CELL_SIZE     = 0.18
+QUARTER_TURN  = math.pi / 2
 
-FAST_LINEAR   = 0.12        # m/s
-SLOW_LINEAR   = 0.07        # m/s  (cell before turn / goal)
-ANGULAR_SPEED = 0.70        # rad/s
-SETTLE_TIME   = 0.5         # s – pause after each primitive
+FAST_LINEAR   = 0.12
+SLOW_LINEAR   = 0.07
+ANGULAR_SPEED = 0.70
+SETTLE_TIME   = 0.5
 
-# safety: if checkpoint never fires, stop after this many seconds
 MAX_CELL_TIME = CELL_SIZE / SLOW_LINEAR + 3.0
 
 # ===================== GRID / WORLD =========================
@@ -64,16 +66,28 @@ ACTION_DELTA      = {UP: (-1, 0), DOWN: (1, 0), LEFT: (0, -1), RIGHT: (0, 1)}
 HEADING_DELTA     = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
 HEADING_NAME      = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
 
-#         col:   0      1      2      3      4      5      6
-policy = np.array([
-    [    RIGHT,  DOWN, RIGHT, RIGHT, RIGHT,  DOWN,  LEFT],  # row 0
-    [       -1,  DOWN,    -1,    -1,    -1,  DOWN,    -1],  # row 1
-    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT,  DOWN],  # row 2
-    [       UP,    -1,    -1,    -1,    UP,    -1,  DOWN],  # row 3
-    [       UP,  LEFT,  DOWN,    -1,    UP,    -1,  DOWN],  # row 4
-    [       UP,    -1, RIGHT, RIGHT,    UP,    -1,  DOWN],  # row 5
-    [       UP,    -1,    UP,    -1,    UP,    -1,    -1],  # row 6
+# ===================== LOAD LEARNED POLICY ==================
+# Primary: load the policy learned by qlearning_train.py.
+# Fallback: the policy from the last training run (so the node still
+# works if the .npy is missing). Re-paste this from the trainer output
+# whenever you retrain.
+_FALLBACK_POLICY = np.array([
+    [ 3,  1,  3,  3,  3,  1,  2],
+    [-1,  1, -1, -1, -1,  1, -1],
+    [ 3,  3,  3,  3,  3,  3,  1],
+    [ 0, -1, -1, -1,  0, -1,  1],
+    [ 0,  2,  1, -1,  0, -1,  1],
+    [ 0, -1,  3,  3,  0, -1,  1],
+    [ 0, -1,  0, -1,  0, -1, -1],
 ], dtype=int)
+
+_POLICY_PATH = os.path.join(os.path.dirname(__file__), 'learned_policy.npy')
+if os.path.exists(_POLICY_PATH):
+    policy = np.load(_POLICY_PATH)
+    _POLICY_SRC = 'learned_policy.npy'
+else:
+    policy = _FALLBACK_POLICY
+    _POLICY_SRC = 'embedded fallback'
 
 
 def compute_policy_path(pol, start, goal, max_len=200):
@@ -104,17 +118,15 @@ class PolicyRunner(Node):
             10,
         )
 
-        # shared sensor state
         self._sensor_data    = [999, 999, 999, 999, 999]
-        self._sensors_on_line  = False   # True  = ≥ ON_LINE_COUNT sensors on black
-        self._sensors_off_line = True    # True  = ≤ OFF_LINE_COUNT sensors on black
+        self._sensors_on_line  = False
+        self._sensors_off_line = True
 
-        self.get_logger().info('PolicyRunner ready — grid-maze mode')
+        self.get_logger().info(
+            f'PolicyRunner ready — Q-learning policy ({_POLICY_SRC})'
+        )
 
     # ──────────────────────────────────────────────
-    # SENSOR CALLBACK
-    # ──────────────────────────────────────────────
-
     def _sensor_cb(self, msg: Int32MultiArray):
         if len(msg.data) != 5:
             return
@@ -131,9 +143,6 @@ class PolicyRunner(Node):
         return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
     # ──────────────────────────────────────────────
-    # MOTION PRIMITIVES
-    # ──────────────────────────────────────────────
-
     def _stop(self):
         self.pub.publish(Twist())
 
@@ -148,23 +157,10 @@ class PolicyRunner(Node):
         time.sleep(SETTLE_TIME)
 
     def _drive_to_next_line(self, linear_speed: float, expected_cell=None):
-        """
-        Drive forward using two-phase checkpoint detection:
-
-          Phase 1  DEPARTING  – robot is on the starting tape line.
-                               Keep driving until sensors go white.
-          Phase 2  SEEKING    – robot is in the white cell.
-                               Keep driving until sensors hit the next line.
-
-        Falls back to timed motion if the line is never found within
-        MAX_CELL_TIME seconds.
-        """
-        # ── Phase 1: wait until robot moves OFF the starting line ──
         phase = 'DEPARTING'
         self.get_logger().info('  [sensor] phase=DEPARTING (leaving start line)')
 
         end = time.time() + MAX_CELL_TIME
-
         while time.time() < end:
             error = self._line_error()
             cmd = Twist()
@@ -175,22 +171,14 @@ class PolicyRunner(Node):
 
             if phase == 'DEPARTING':
                 if self._sensors_off_line:
-                    # sensors now in white cell → switch to seeking
                     phase = 'SEEKING'
                     self.get_logger().info('  [sensor] phase=SEEKING (in white cell)')
-
             elif phase == 'SEEKING':
                 if self._sensors_on_line:
-                    # hit the next cell boundary line
-                    self.get_logger().info(
-                        f'  [sensor] checkpoint → {expected_cell}'
-                    )
+                    self.get_logger().info(f'  [sensor] checkpoint → {expected_cell}')
                     break
-
         else:
-            self.get_logger().warn(
-                '  [sensor] timed out — using dead-reckoning position'
-            )
+            self.get_logger().warn('  [sensor] timed out — using dead-reckoning position')
 
         self._stop()
         time.sleep(SETTLE_TIME)
@@ -209,9 +197,6 @@ class PolicyRunner(Node):
         return desired
 
     # ──────────────────────────────────────────────
-    # POLICY HELPERS
-    # ──────────────────────────────────────────────
-
     def _in_bounds_and_free(self, pos) -> bool:
         r, c = pos
         return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
@@ -226,20 +211,14 @@ class PolicyRunner(Node):
         return nxt_a != int(policy[current_pos])
 
     # ──────────────────────────────────────────────
-    # MAIN LOOP
-    # ──────────────────────────────────────────────
-
     def run(self):
-        time.sleep(1.5)   # let connections settle
+        time.sleep(1.5)
 
         pos     = START
-        heading = 0       # North
-        self.get_logger().info(
-            f'Start {pos}  heading {HEADING_NAME[heading]}'
-        )
+        heading = 0
+        self.get_logger().info(f'Start {pos}  heading {HEADING_NAME[heading]}')
 
         for step in range(1, 100):
-
             if pos == GOAL:
                 self.get_logger().info(f'*** Goal reached in {step-1} steps ***')
                 return
@@ -249,10 +228,8 @@ class PolicyRunner(Node):
                 self.get_logger().warn(f'No action at {pos}')
                 return
 
-            # ── rotate to face policy direction ──────────
             heading = self.face(heading, ACTION_TO_HEADING[action])
 
-            # ── compute target cell ───────────────────────
             dr, dc = HEADING_DELTA[heading]
             target = (pos[0] + dr, pos[1] + dc)
 
@@ -260,14 +237,11 @@ class PolicyRunner(Node):
                 self.get_logger().warn(f'Obstacle at {target}, aborting.')
                 return
 
-            # ── choose speed ──────────────────────────────
             linear = SLOW_LINEAR if self._turn_coming(pos, target) else FAST_LINEAR
             tag    = 'slow' if linear == SLOW_LINEAR else 'fast'
 
-            # ── drive to next cell line ───────────────────
             self.get_logger().info(
-                f'step {step:2d}: {pos} → {target}  '
-                f'{HEADING_NAME[heading]}  ({tag})'
+                f'step {step:2d}: {pos} → {target}  {HEADING_NAME[heading]}  ({tag})'
             )
             self._drive_to_next_line(linear, expected_cell=target)
             pos = target
@@ -278,6 +252,7 @@ class PolicyRunner(Node):
 # ────────────────────────────────────────────────────────────
 def main():
     path = compute_policy_path(policy, START, GOAL)
+    print(f'[policy_runner] policy source: {_POLICY_SRC}')
     print(f'[policy_runner] path ({len(path)} cells): {path}')
     rclpy.init()
     node = PolicyRunner()

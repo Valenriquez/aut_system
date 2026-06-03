@@ -60,8 +60,8 @@ SETTLE_TIME   = 0.4         # s    pause after each primitive
 # timer will be approximate. To calibrate: command a speed for 5 s,
 # tape-measure the distance, real = distance / 5, put it here.
 REAL_SPEED = {
-    # FAST_LINEAR: 0.14,   # <- fill in from a calibration drive
-    # SLOW_LINEAR: 0.095,  # <- fill in from a calibration drive
+    FAST_LINEAR: 0.14,   # <- fill in from a calibration drive
+    SLOW_LINEAR: 0.095,  # <- fill in from a calibration drive
 }
 
 ARRIVE_GATE_FRAC = 0.5      # ignore line crossings for first half of the move

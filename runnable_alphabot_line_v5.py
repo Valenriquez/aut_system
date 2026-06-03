@@ -1,25 +1,19 @@
 #!/usr/bin/env python3
 """
-policy_runner_v5.py  –  AlphaBot2 (ROS 2 Humble)
+policy_runner_v6.py  –  AlphaBot2 (ROS 2 Humble)
 
-Corrected from Variant A. Three fixes:
+Fixes over v5 (which drove off the board):
 
-  1. STEERING SIGN FLIPPED
-     WEIGHTS is now [2, 1, 0, -1, -2] (was [-2,-1,0,1,2]).
-     The robot was steering AWAY from the line ("escaping"); the
-     correction direction was inverted for this sensor mounting.
-     Now `angular.z = -KP*error` pushes back ONTO the line.
+  1. STEERING SIGN REVERTED to WEIGHTS = [-2,-1,0,1,2].
+     The v5 flip caused POSITIVE feedback: the line ran off the
+     sensor array instead of being re-centered. Reverted.
 
-  2. HIGHER SPEEDS (above motor deadband)
-     0.07 m/s was likely below the AlphaBot2's minimum PWM, so the
-     wheels buzzed without turning. Floored well above that.
-
-  3. TIMING-PRIMARY + RISING-EDGE RE-ANCHOR (line sensors only)
-     The timer decides expected arrival. On a GAPPED move (cross
-     white, then a new line) the rising edge into that line is
-     ground truth -> stop there (kills along-track drift). On a
-     CONTINUOUS-tape move (never goes white) no edge fires and the
-     timer stops it. Sensors also steer the whole time.
+  2. LINE-LOSS RECOVERY (the real escape fix).
+     v5 had no recovery: when count==0 the error was None, so
+     angular.z=0 and the robot drove dead straight off the line
+     forever. Now, when the line is lost, the robot ARCS back
+     toward the side the line was last seen (slower forward +
+     turn) until it re-acquires it.
 
 Topics
   subscribe : /alphabot2/line_sensors  (std_msgs/msg/Int32MultiArray)
@@ -40,32 +34,33 @@ from rclpy.qos import qos_profile_sensor_data
 # ===================== IR SENSOR TUNING =====================
 THRESHOLD      = 700
 KP             = 0.30
-WEIGHTS        = [2, 1, 0, -1, -2]   # FLIPPED: fixes "escaping the line"
+WEIGHTS        = [-2, -1, 0, 1, 2]   # REVERTED (v5's flip was wrong)
 ON_LINE_COUNT  = 3      # >=3 sensors on black -> on a line
 OFF_LINE_COUNT = 1      # <=1 sensor on black  -> in white (off the line)
+
+# ── LINE-LOSS RECOVERY ───────────────────────────────────────
+RECOVERY_TURN     = 0.6    # rad/s  turn rate while line is lost
+RECOVERY_FWD_FRAC = 0.4    # fraction of forward speed kept while searching
 
 # ===================== MOTION TUNING ========================
 CELL_SIZE     = 0.18        # m  <- MEASURE intersection-to-intersection pitch
 QUARTER_TURN  = math.pi / 2
 
-# Raised above the deadband. If it still won't move, raise further.
-FAST_LINEAR   = 0.18        # m/s  straightaways
-SLOW_LINEAR   = 0.12        # m/s  cell before a turn / goal
+FAST_LINEAR   = 0.15        # m/s  straightaways (a touch slower = easier to track)
+SLOW_LINEAR   = 0.11        # m/s  cell before a turn / goal
 ANGULAR_SPEED = 0.80        # rad/s
-SETTLE_TIME   = 0.4         # s    pause after each primitive
+SETTLE_TIME   = 0.4         # s
 
-# Measured REAL ground speeds (m/s) for each commanded speed.
-# Until you calibrate, these fall back to the commanded value, so the
-# timer will be approximate. To calibrate: command a speed for 5 s,
-# tape-measure the distance, real = distance / 5, put it here.
+# Measured REAL ground speeds (m/s). THESE ARE STILL UNMEASURED GUESSES —
+# the timer is unreliable until you replace them with real numbers
+# (command a speed 5 s, tape-measure distance, real = distance / 5).
 REAL_SPEED = {
-    FAST_LINEAR: 0.14,   # <- fill in from a calibration drive
-    SLOW_LINEAR: 0.095,  # <- fill in from a calibration drive
+    # FAST_LINEAR: 0.??,
+    # SLOW_LINEAR: 0.??,
 }
 
-ARRIVE_GATE_FRAC = 0.5      # ignore line crossings for first half of the move
-ARRIVE_GRACE     = 0.4      # extra seconds allowed past expected to catch
-                            # a slightly-late edge on a gapped move
+ARRIVE_GATE_FRAC = 0.5
+ARRIVE_GRACE     = 0.4
 
 # ===================== GRID / WORLD =========================
 GRID_SIZE = 7
@@ -113,18 +108,18 @@ def compute_policy_path(pol, start, goal, max_len=200):
 class PolicyRunner(Node):
 
     def __init__(self):
-        super().__init__('policy_runner_v5')
+        super().__init__('policy_runner_v6')
         self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
         self.sub = self.create_subscription(
             Int32MultiArray,
             '/alphabot2/line_sensors',
             self._sensor_cb,
-            qos_profile_sensor_data,   # match typical BEST_EFFORT sensor publisher
+            qos_profile_sensor_data,
         )
         self._sensor_data = [999, 999, 999, 999, 999]
         self._count       = 0
         self._on_line     = False
-        self.get_logger().info('PolicyRunner v5 ready')
+        self.get_logger().info('PolicyRunner v6 ready')
 
     # ── sensing ────────────────────────────────────
     def _sensor_cb(self, msg: Int32MultiArray):
@@ -161,11 +156,9 @@ class PolicyRunner(Node):
 
     def _drive_one_cell(self, linear_speed: float, expected_cell=None):
         """
-        Timing-primary, line-re-anchored cell traversal.
-
-        - GAPPED move: rising edge (white -> line) is ground truth -> stop.
-        - CONTINUOUS-tape move: no edge -> timer stops it.
-        - Sensors steer the whole time (corrected sign).
+        Timing-primary, line-re-anchored, WITH line-loss recovery.
+        While on the line: proportional steer (reverted sign).
+        While off the line: arc back toward the last-seen side.
         """
         real_speed = REAL_SPEED.get(linear_speed, linear_speed)
         expected   = CELL_SIZE / real_speed
@@ -175,6 +168,7 @@ class PolicyRunner(Node):
         start            = time.time()
         prev_on          = self._on_line
         seen_white_after = False
+        last_error       = 0.0     # remembers which side the line was on
 
         self.get_logger().info(
             f'  [drive] -> {expected_cell}  real={real_speed:.3f}  '
@@ -199,7 +193,7 @@ class PolicyRunner(Node):
             if elapsed >= expected and not seen_white_after:
                 self.get_logger().info(
                     f'  [drive] timer at {elapsed:.2f}s '
-                    f'-> {expected_cell} (continuous tape, dead-reckoned)'
+                    f'-> {expected_cell} (continuous tape)'
                 )
                 break
 
@@ -210,12 +204,20 @@ class PolicyRunner(Node):
                 )
                 break
 
-            prev_on = on
             error = self._line_error()
             cmd = Twist()
-            cmd.linear.x  = linear_speed
-            cmd.angular.z = (-KP * error) if error is not None else 0.0
+            if error is not None:
+                # ON the line: proportional steering
+                last_error    = error
+                cmd.linear.x  = linear_speed
+                cmd.angular.z = -KP * error
+            else:
+                # LINE LOST: arc back toward the last-seen side
+                cmd.linear.x  = linear_speed * RECOVERY_FWD_FRAC
+                cmd.angular.z = -RECOVERY_TURN * (1.0 if last_error >= 0 else -1.0)
             self.pub.publish(cmd)
+
+            prev_on = on
             rclpy.spin_once(self, timeout_sec=0.04)
 
         self._stop()
@@ -287,7 +289,7 @@ class PolicyRunner(Node):
 
 def main():
     path = compute_policy_path(policy, START, GOAL)
-    print(f'[v5] path ({len(path)} cells): {path}')
+    print(f'[v6] path ({len(path)} cells): {path}')
     rclpy.init()
     node = PolicyRunner()
     try:

@@ -34,6 +34,8 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray
 from geometry_msgs.msg import Twist
+from rclpy.qos import qos_profile_sensor_data
+
 
 # ===================== IR SENSOR TUNING =====================
 THRESHOLD     = 700
@@ -113,6 +115,7 @@ class PolicyRunner(Node):
             Int32MultiArray,
             '/alphabot2/line_sensors',
             self._sensor_cb, 10,
+            qos_profile_sensor_data,
         )
         self._sensor_data   = [999, 999, 999, 999, 999]
         self._on_line       = False
@@ -126,6 +129,10 @@ class PolicyRunner(Node):
         self._sensor_data = list(msg.data)
         count = sum(1 for v in self._sensor_data if v < THRESHOLD)
         self._on_line = count >= ON_LINE_COUNT
+        self.get_logger().info(
+            f'raw={self._sensor_data} count={count}',
+            throttle_duration_sec=0.5,
+        )
 
     def _line_error(self):
         binary = [1 if v < THRESHOLD else 0 for v in self._sensor_data]

@@ -28,7 +28,6 @@ Topics
 
 import time
 import math
-
 import numpy as np
 
 import rclpy

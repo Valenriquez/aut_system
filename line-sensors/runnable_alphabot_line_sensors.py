@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
-"""
-policy_runner_v6.py  –  AlphaBot2 (ROS 2 Humble)
+"""AlphaBot2 line-following policy runner (ROS 2 Humble).
 
-Fixes over v5 (which drove off the board):
-
-  1. STEERING SIGN REVERTED to WEIGHTS = [-2,-1,0,1,2].
-     The v5 flip caused POSITIVE feedback: the line ran off the
-     sensor array instead of being re-centered. Reverted.
-
-  2. LINE-LOSS RECOVERY (the real escape fix).
-     v5 had no recovery: when count==0 the error was None, so
-     angular.z=0 and the robot drove dead straight off the line
-     forever. Now, when the line is lost, the robot ARCS back
-     toward the side the line was last seen (slower forward +
-     turn) until it re-acquires it.
-
-Topics
+Topics:
   subscribe : /alphabot2/line_sensors  (std_msgs/msg/Int32MultiArray)
   publish   : /alphabot2/cmd_vel       (geometry_msgs/msg/Twist)
 """
@@ -31,41 +17,28 @@ from geometry_msgs.msg import Twist
 from rclpy.qos import qos_profile_sensor_data
 
 
-# ===================== IR SENSOR TUNING =====================
 THRESHOLD      = 700
 KP             = 0.30
-WEIGHTS        = [-2, -1, 0, 1, 2]   # REVERTED (v5's flip was wrong)
-ON_LINE_COUNT  = 3      # >=3 sensors on black -> on a line
-OFF_LINE_COUNT = 1      # <=1 sensor on black  -> in white (off the line)
+WEIGHTS        = [-2, -1, 0, 1, 2]
+ON_LINE_COUNT  = 3
+OFF_LINE_COUNT = 1
 
-# ── DISCRETE STEERING ────────────────────────────────────────
-# Turn rate applied when the black line is off to one side.
-# Per your sensor mapping: black on high-index side -> LEFT.
-STEER_LEFT  = +0.6    # rad/s  (positive = left / CCW in ROS)
-STEER_RIGHT = -0.6    # rad/s  (negative = right / CW)
-# If the robot turns the WRONG way on the bench, swap these two signs.
+STEER_LEFT  = +0.6
+STEER_RIGHT = -0.6
 
-# ===================== MOTION TUNING ========================
-CELL_SIZE     = 0.18        # m  <- MEASURE intersection-to-intersection pitch
+CELL_SIZE     = 0.18
 QUARTER_TURN  = math.pi / 2
 
-FAST_LINEAR   = 0.15        # m/s  straightaways (a touch slower = easier to track)
-SLOW_LINEAR   = 0.11        # m/s  cell before a turn / goal
-ANGULAR_SPEED = 0.80        # rad/s
-SETTLE_TIME   = 0.4         # s
+FAST_LINEAR   = 0.15
+SLOW_LINEAR   = 0.11
+ANGULAR_SPEED = 0.80
+SETTLE_TIME   = 0.4
 
-# Measured REAL ground speeds (m/s). THESE ARE STILL UNMEASURED GUESSES —
-# the timer is unreliable until you replace them with real numbers
-# (command a speed 5 s, tape-measure distance, real = distance / 5).
-REAL_SPEED = {
-    # FAST_LINEAR: 0.??,
-    # SLOW_LINEAR: 0.??,
-}
+REAL_SPEED = {}
 
 ARRIVE_GATE_FRAC = 0.5
 ARRIVE_GRACE     = 0.4
 
-# ===================== GRID / WORLD =========================
 GRID_SIZE = 7
 START     = (0, 0)
 GOAL      = (6, 6)
@@ -122,9 +95,8 @@ class PolicyRunner(Node):
         self._sensor_data = [999, 999, 999, 999, 999]
         self._count       = 0
         self._on_line     = False
-        self.get_logger().info('PolicyRunner v6 ready')
+        self.get_logger().info('PolicyRunner ready')
 
-    # ── sensing ────────────────────────────────────
     def _sensor_cb(self, msg: Int32MultiArray):
         if len(msg.data) != 5:
             return
@@ -144,38 +116,24 @@ class PolicyRunner(Node):
         return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
     def _steer(self) -> float:
-        """
-        Discrete steering from the black/white pattern.
-
-          centered  (>=3 black, e.g. [W,B,B,B,W])  -> straight
-          black on the higher-index side           -> turn LEFT
-          black on the lower-index side            -> turn RIGHT
-          no black at all                          -> straight
-                                                      (find the next line,
-                                                       no turn-hunting)
-        """
         b = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
         count = sum(b)
 
-        # no line: drive straight to reach the next black line
         if count == 0:
             return 0.0
 
-        # well-centered on the line: straight
         if count >= ON_LINE_COUNT:
             return 0.0
 
-        # off to one side: compare which half holds the black
-        left_side  = b[3] + b[4]   # higher-index sensors  -> "left" per your spec
-        right_side = b[0] + b[1]   # lower-index sensors   -> "right" per your spec
+        left_side  = b[3] + b[4]
+        right_side = b[0] + b[1]
 
         if left_side > right_side:
             return STEER_LEFT
         if right_side > left_side:
             return STEER_RIGHT
-        return 0.0                 # tie / only center sensor -> straight
+        return 0.0
 
-    # ── primitives ─────────────────────────────────
     def _stop(self):
         self.pub.publish(Twist())
 
@@ -190,11 +148,6 @@ class PolicyRunner(Node):
         time.sleep(SETTLE_TIME)
 
     def _drive_one_cell(self, linear_speed: float, expected_cell=None):
-        """
-        Timing-primary, line-re-anchored, with discrete steering.
-        On the line: straight / left / right per the black pattern.
-        Line lost: go straight to reach the next black line (no turning).
-        """
         real_speed = REAL_SPEED.get(linear_speed, linear_speed)
         expected   = CELL_SIZE / real_speed
         gate_time  = expected * ARRIVE_GATE_FRAC
@@ -240,7 +193,7 @@ class PolicyRunner(Node):
 
             cmd = Twist()
             cmd.linear.x  = linear_speed
-            cmd.angular.z = self._steer()   # discrete: straight / left / right
+            cmd.angular.z = self._steer()
             self.pub.publish(cmd)
 
             prev_on = on
@@ -262,7 +215,6 @@ class PolicyRunner(Node):
             self._rotate(+ANGULAR_SPEED, dur)
         return desired
 
-    # ── policy helpers ─────────────────────────────
     def _in_bounds_and_free(self, pos) -> bool:
         r, c = pos
         return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
@@ -276,7 +228,6 @@ class PolicyRunner(Node):
             return True
         return na != int(policy[cur])
 
-    # ── main loop ──────────────────────────────────
     def run(self):
         time.sleep(1.5)
         pos, heading = START, 0
@@ -315,7 +266,7 @@ class PolicyRunner(Node):
 
 def main():
     path = compute_policy_path(policy, START, GOAL)
-    print(f'[v6] path ({len(path)} cells): {path}')
+    print(f'[runner] path ({len(path)} cells): {path}')
     rclpy.init()
     node = PolicyRunner()
     try:

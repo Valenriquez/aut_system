@@ -7,19 +7,14 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
-# ===================== MOTION TUNING =====================
-# Speed is variable per step: FAST on open straight stretches, SLOW on the cell
-# right before a turn (or approaching the goal). Each step always covers exactly
-# one cell -- the duration is computed from the chosen speed.
-CELL_SIZE     = 0.225          # m -- one grid cell (must match maze.sdf)
-QUARTER_TURN  = math.pi / 2    # rad -- one 90 deg turn
+CELL_SIZE     = 0.225
+QUARTER_TURN  = math.pi / 2
 
-FAST_LINEAR   = 0.15           # m/s -- open straight stretches (gentler ramp)
-SLOW_LINEAR   = 0.08           # m/s -- last cell before a turn / near the goal
-ANGULAR_SPEED = 0.7854         # rad/s -- 90 deg in 2 sec (calm)
-SETTLE_TIME   = 0.8            # s   -- pause after each motion to let robot fully stop
+FAST_LINEAR   = 0.15
+SLOW_LINEAR   = 0.08
+ANGULAR_SPEED = 0.7854
+SETTLE_TIME   = 0.8
 
-# ===================== GRID / WORLD =====================
 GRID_SIZE = 7
 START = (0, 0)
 GOAL  = (6, 6)
@@ -38,15 +33,14 @@ ACTION_NAME       = {UP: 'UP', DOWN: 'DOWN', LEFT: 'LEFT', RIGHT: 'RIGHT', -1: '
 HEADING_DELTA     = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
 HEADING_NAME      = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
 
-# ===================== POLICY =====================
 policy = np.array([
-    [    RIGHT, DOWN, RIGHT, RIGHT, RIGHT, DOWN,  LEFT],   # row 0
-    [       -1, DOWN,    -1,    -1,    -1, DOWN,    -1],   # row 1
-    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, DOWN],  # row 2
-    [       UP,   -1,    -1,    -1,    UP,    -1, DOWN],   # row 3
-    [       UP, LEFT,  DOWN,    -1,    UP,    -1, DOWN],   # row 4
-    [       UP,   -1, RIGHT, RIGHT,    UP,    -1, DOWN],   # row 5
-    [       UP,   -1,    UP,    -1,    UP,    -1,   -1],   # row 6
+    [    RIGHT, DOWN, RIGHT, RIGHT, RIGHT, DOWN,  LEFT],
+    [       -1, DOWN,    -1,    -1,    -1, DOWN,    -1],
+    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, DOWN],
+    [       UP,   -1,    -1,    -1,    UP,    -1, DOWN],
+    [       UP, LEFT,  DOWN,    -1,    UP,    -1, DOWN],
+    [       UP,   -1, RIGHT, RIGHT,    UP,    -1, DOWN],
+    [       UP,   -1,    UP,    -1,    UP,    -1,   -1],
 ], dtype=int)
 
 
@@ -107,8 +101,6 @@ class PolicyRunner(Node):
                 and pos not in OBSTACLES)
 
     def turn_coming(self, current_pos, next_pos):
-        """True if the move AFTER this one will require a 90 deg turn -- so
-        the robot should slow down for this step to set up cleanly."""
         if next_pos == GOAL or next_pos in OBSTACLES:
             return True
         next_action = int(policy[next_pos])

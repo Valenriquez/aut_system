@@ -1,23 +1,9 @@
 #!/usr/bin/env python3
-"""
-policy_runner_qlearning.py  -  AlphaBot2 (ROS 2 Humble)
+"""Q-learning trainer and policy runner for the AlphaBot2.
 
-ONE FILE: learns the maze policy with Q-learning AND drives the robot with it.
-Line sensors only -- topics used are exactly:
-    /alphabot2/line_sensors   (Int32MultiArray, 5 values)
-    /alphabot2/cmd_vel        (Twist)
-
-Two modes:
+Modes:
     python3 q-learning.py run     # drive the robot (default)
     python3 q-learning.py train   # re-derive the policy
-
-TRAIN writes the greedy policy to learned_policy.txt next to this file.
-RUN loads learned_policy.txt if present, otherwise the embedded fallback,
-then executes it cell by cell:
-  * STEERING keeps the robot centered on the black line during each forward
-    move (KP on the weighted line error) -> this is what makes it go straight.
-  * FORWARD is one timed cell (CELL_SIZE / speed); line steering re-centers it.
-  * TURNS are timed 90 deg rotations from a full stop.
 """
 
 import os
@@ -27,8 +13,6 @@ import time
 import argparse
 import numpy as np
 
-# rclpy is only needed for `run`. Import it guarded so `train` works on any
-# machine (no ROS install required -- pure numpy).
 try:
     import rclpy
     from rclpy.node import Node
@@ -41,9 +25,6 @@ except Exception:
     Node = object
 
 
-# =============================================================================
-#  SHARED WORLD DEFINITION  (identical for trainer and runner)
-# =============================================================================
 GRID_SIZE = 7
 START     = (0, 0)
 GOAL      = (6, 6)
@@ -68,7 +49,6 @@ _POLICY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 def compute_policy_path(pol, start=START, goal=GOAL, max_len=200):
-    """Greedy rollout of a policy from start to goal (used by both halves)."""
     path, seen, pos = [start], {start}, start
     while pos != goal and len(path) < max_len:
         action = int(pol[pos])
@@ -83,9 +63,6 @@ def compute_policy_path(pol, start=START, goal=GOAL, max_len=200):
     return path
 
 
-# =============================================================================
-#  PART 1 -- Q-LEARNING TRAINER  (offline, pure numpy, no ROS needed)
-# =============================================================================
 GOAL_REWARD  = 100.0
 STEP_PENALTY = -20.0
 WALL_PENALTY = -10.0
@@ -119,14 +96,13 @@ def train_q():
         epsilon = EPS_START + frac * (EPS_END - EPS_START)
         state, total = START, 0.0
         for _ in range(MAX_STEPS):
-            if rng.random() < epsilon:                       # explore
+            if rng.random() < epsilon:
                 action = int(rng.integers(len(ACTIONS)))
-            else:                                            # exploit
+            else:
                 action = int(np.argmax(Q[state[0], state[1]]))
             nxt, reward, done = env_step(state, action)
             total += reward
             best_next = 0.0 if done else float(np.max(Q[nxt[0], nxt[1]]))
-            # Q(s,a) += alpha * [r + gamma * max_a' Q(s',a') - Q(s,a)]
             td_error  = reward + GAMMA * best_next - Q[state[0], state[1], action]
             Q[state[0], state[1], action] += ALPHA * td_error
             state = nxt
@@ -176,39 +152,25 @@ def run_training():
     return pol
 
 
-# =============================================================================
-#  PART 2 -- RUNNER CALIBRATION  (line-sensor-only, timed motion)
-# =============================================================================
-# ----- line sensor -----
-THRESHOLD = 700          # value < THRESHOLD => black  (sim: ~400 black, ~800/999 white)
-KP        = 0.10         # steering gain on the weighted line error
+THRESHOLD = 700
+KP        = 0.10
 WEIGHTS   = [-2, -1, 0, 1, 2]
 
-# ----- direction (sim = standard ROS) -----
 YAW_SIGN      = +1
 STEER_SIGN    = +1
 STRAIGHT_TRIM = 0.0
 
-# ----- motion tuning -----
-CELL_SIZE     = 0.225    # one grid cell (m) -- must match maze.sdf
+CELL_SIZE     = 0.225
 QUARTER_TURN  = math.pi / 2
-FAST_LINEAR   = 0.22     # m/s on straights
-SLOW_LINEAR   = 0.15     # m/s on the cell before a turn / near the goal
-ANGULAR_SPEED = 0.80     # rad/s for turns
-SETTLE_TIME   = 0.9      # s -- pause so the robot fully STOPS before turning
+FAST_LINEAR   = 0.22
+SLOW_LINEAR   = 0.15
+ANGULAR_SPEED = 0.80
+SETTLE_TIME   = 0.9
 
-# Turn duration = TURN_TIME_SCALE * 90deg / ANGULAR_SPEED.
-# Raise if turns under-rotate, lower if they overshoot.
 TURN_TIME_SCALE = 1.3
-
-# Forward duration = CELL_SIZE / speed * FWD_TIME_SCALE.
-# Raise if the robot stops SHORT of cells, lower if it overshoots.
-FWD_TIME_SCALE = 1.0
+FWD_TIME_SCALE  = 1.0
 
 
-# =============================================================================
-#  LOAD POLICY FOR THE RUNNER  (learned_policy.txt if present, else fallback)
-# =============================================================================
 _FALLBACK_POLICY = np.array([
     [ 3,  1,  3,  3,  3,  1,  2],
     [-1,  1, -1, -1, -1,  1, -1],
@@ -227,7 +189,6 @@ else:
     _POLICY_SRC = 'embedded fallback'
 
 
-# ------------------------------------------------------------
 class PolicyRunner(Node):
 
     def __init__(self):
@@ -242,7 +203,6 @@ class PolicyRunner(Node):
         self.get_logger().info(
             f'PolicyRunner (Q-learning) ready - policy: {_POLICY_SRC}')
 
-    # -- sensing --
     def _sensor_cb(self, msg):
         if len(msg.data) != 5:
             return
@@ -250,20 +210,16 @@ class PolicyRunner(Node):
         self._count = sum(1 for v in self._sensor_data if v < THRESHOLD)
 
     def _line_error(self):
-        """Weighted lateral error of the line under the 5 sensors, or None when
-        no sensor sees the line."""
         binary = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
         count  = sum(binary)
         if count == 0:
             return None
         return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
-    # -- motion primitives --
     def _stop(self):
         self.pub.publish(Twist())
 
     def _turn_timed(self, angular_z, duration):
-        """Rotate in place for a fixed time, then stop and settle."""
         cmd = Twist(); cmd.angular.z = YAW_SIGN * angular_z
         end = time.time() + duration
         while time.time() < end:
@@ -272,8 +228,6 @@ class PolicyRunner(Node):
         self._stop(); time.sleep(SETTLE_TIME)
 
     def _drive_cell(self, speed):
-        """Drive forward one cell (timed) while the line sensor steers the
-        robot to stay centered on the black line."""
         duration = (CELL_SIZE / speed) * FWD_TIME_SCALE
         end = time.time() + duration
         while time.time() < end:
@@ -287,27 +241,24 @@ class PolicyRunner(Node):
         self._stop(); time.sleep(SETTLE_TIME)
 
     def face(self, current, desired):
-        """Turn (timed) to face `desired` heading; returns the new heading."""
         diff = (desired - current) % 4
         if diff == 0:
             return desired
         dur = TURN_TIME_SCALE * QUARTER_TURN / ANGULAR_SPEED
-        if diff == 1:        # right
+        if diff == 1:
             self._turn_timed(-ANGULAR_SPEED, dur)
-        elif diff == 2:      # u-turn
+        elif diff == 2:
             self._turn_timed(-ANGULAR_SPEED, 2 * dur)
-        else:                # left
+        else:
             self._turn_timed(+ANGULAR_SPEED, dur)
         return desired
 
-    # -- policy helpers --
     def _in_bounds_and_free(self, pos):
         r, c = pos
         return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
                 and pos not in OBSTACLES)
 
     def _turn_coming(self, cur, nxt):
-        """True if the move after `nxt` needs a turn -> drive `nxt` slowly."""
         if nxt == GOAL or nxt in OBSTACLES:
             return True
         na = int(policy[nxt])
@@ -315,7 +266,6 @@ class PolicyRunner(Node):
             return True
         return na != int(policy[cur])
 
-    # -- main loop --
     def run(self):
         time.sleep(1.5)
         pos, heading = START, 0
@@ -346,7 +296,6 @@ class PolicyRunner(Node):
         self.get_logger().warn('Step limit reached.')
 
 
-# ------------------------------------------------------------
 def run_robot():
     if not _ROS_OK:
         sys.exit('ERROR: rclpy not found. Run inside ROS 2 first:\n'

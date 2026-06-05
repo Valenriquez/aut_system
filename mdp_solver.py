@@ -1,10 +1,7 @@
 import numpy as np
 import json
 
-# ── 1. DEFINE YOUR GRID ──────────────────────────────────────────────────────
 # 0 = free cell, 1 = wall, 'G' = goal
-# 7x7 maze (same layout as the Q-learning files): start (0,0), goal (6,6).
-# Walls correspond to the OBSTACLES set; 'G' marks the goal cell.
 GRID = [
     [0,  0,  0,  0,  0,  0,  0 ],
     [1,  0,  1,  1,  1,  0,  1 ],
@@ -17,11 +14,9 @@ GRID = [
 ROWS = len(GRID)
 COLS = len(GRID[0])
 
-# Find goal position
 GOAL = next((r, c) for r in range(ROWS)
                     for c in range(COLS) if GRID[r][c] == 'G')
 
-# ── 2. DEFINE MDP PARAMETERS ─────────────────────────────────────────────────
 ACTIONS = {
     'up':    (-1,  0),
     'down':  ( 1,  0),
@@ -29,16 +24,15 @@ ACTIONS = {
     'right': ( 0,  1),
 }
 
-GAMMA   = 0.9    # discount factor
-NOISE   = 0.1    # 10% chance of drifting sideways (from your slides)
+GAMMA   = 0.9
+NOISE   = 0.0
 REWARD_GOAL = 100
 REWARD_STEP = -20
 REWARD_WALL = -10
-THRESHOLD   = 0.001  # stop when values change less than this
+THRESHOLD   = 0.001
 
-# ── 3. HELPER FUNCTIONS ───────────────────────────────────────────────────────
+
 def is_free(r, c):
-    """True if cell exists and is not a wall."""
     return 0 <= r < ROWS and 0 <= c < COLS and GRID[r][c] != 1
 
 def get_reward(r, c):
@@ -49,18 +43,10 @@ def get_reward(r, c):
     return REWARD_STEP
 
 def transition(r, c, action):
-    """
-    Returns list of (probability, next_r, next_c).
-    0.8 → intended direction
-    0.1 → drift left of intended
-    0.1 → drift right of intended
-    If the robot hits a wall, it stays in place.
-    """
     dr, dc = ACTIONS[action]
-    # Define the three possible outcomes
-    intended   = (dr, dc)
-    drift_left  = ( dc, -dr)   # rotate 90° left
-    drift_right = (-dc,  dr)   # rotate 90° right
+    intended    = (dr, dc)
+    drift_left  = ( dc, -dr)
+    drift_right = (-dc,  dr)
 
     outcomes = [
         (1 - 2 * NOISE, intended),
@@ -72,13 +58,11 @@ def transition(r, c, action):
     for prob, (mr, mc) in outcomes:
         nr, nc = r + mr, c + mc
         if not is_free(nr, nc):
-            nr, nc = r, c      # bounce back to current cell
+            nr, nc = r, c
         results.append((prob, nr, nc))
     return results
 
-# ── 4. VALUE ITERATION ────────────────────────────────────────────────────────
 def value_iteration():
-    # Initialize V(s) = 0 for all states
     V = np.zeros((ROWS, COLS))
 
     iteration = 0
@@ -88,14 +72,12 @@ def value_iteration():
 
         for r in range(ROWS):
             for c in range(COLS):
-                # Skip walls and goal (goal value is fixed)
                 if GRID[r][c] == 1:
                     continue
                 if (r, c) == GOAL:
                     new_V[r][c] = REWARD_GOAL
                     continue
 
-                # Bellman update: try every action, keep the best
                 action_values = []
                 for action in ACTIONS:
                     total = 0
@@ -115,18 +97,13 @@ def value_iteration():
 
     return V
 
-# ── 5. POLICY EXTRACTION ──────────────────────────────────────────────────────
 def extract_policy(V):
-    """
-    For each cell, pick the action that gives the highest expected value.
-    This is the argmax from your slides.
-    """
     policy = {}
 
     for r in range(ROWS):
         for c in range(COLS):
             if GRID[r][c] == 1:
-                policy[f"{r},{c}"] = None   # wall
+                policy[f"{r},{c}"] = None
                 continue
             if (r, c) == GOAL:
                 policy[f"{r},{c}"] = 'goal'
@@ -147,7 +124,6 @@ def extract_policy(V):
 
     return policy
 
-# ── 6. SAVE TO FILE ───────────────────────────────────────────────────────────
 def save_policy(policy, V, path="policy.json"):
     output = {
         "policy": policy,
@@ -160,7 +136,6 @@ def save_policy(policy, V, path="policy.json"):
         json.dump(output, f, indent=2)
     print(f"Policy saved to {path}")
 
-# ── 7. RUN ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("Running value iteration...")
     V = value_iteration()

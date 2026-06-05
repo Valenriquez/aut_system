@@ -22,42 +22,28 @@ try:
 except ImportError:
     HAS_CV_BRIDGE = False
 
-# ===================== MOTION TUNING =====================
 LINEAR_SPEED  = 0.15
 ANGULAR_SPEED = 1.5
 FORWARD_TIME  = 1.5
 TURN_90_TIME  = 1.0
 
-# ===================== CAMERA / LOCALIZATION =====================
-# AlphaBot2 publishes a CompressedImage. The Lab guide shows the topic
-# both as /camera/compressed and /image/compressed -- confirm with
-# `ros2 topic list` and adjust CAMERA_TOPIC if needed.
 CAMERA_TOPIC          = '/camera/compressed'
-CAMERA_COMPRESSED     = True    # True -> CompressedImage, False -> raw Image
-CORRECT_FROM_CAMERA   = True    # markers ARE the localization -> snap to them
-FRAME_WAIT_AFTER_MOVE = 0.2     # extra settle time before reading a frame
+CAMERA_COMPRESSED     = True
+CORRECT_FROM_CAMERA   = True
+FRAME_WAIT_AFTER_MOVE = 0.2
 
-# Directory holding the printable ArUco SVG markers (svgs/4x4_1000-<id>.svg).
 SVG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'svgs')
 
-# ---- FIXED SVG MARKER POSITIONS ---------------------------------
-# Each SVG (svgs/4x4_1000-<id>.svg) is printed and taped onto ONE fixed
-# cell of the 7x7 map. This table is the ground truth of WHERE each
-# marker physically is -- edit the (row, col) values so they match the
-# real placement in the lab. Every cell here must lie on the policy
-# path, so that detecting marker N pins the robot to a known waypoint.
-#
-#   ArUco id : (row, col) on the 7x7 grid
+# ArUco id : (row, col) on the 7x7 grid
 MARKER_TO_CELL = {
-    0: (0, 0),   # policy-path start
-    1: (0, 1),   # turn: RIGHT -> DOWN
-    2: (2, 1),   # turn: DOWN  -> RIGHT
-    3: (2, 3),   # middle of the row-2 corridor
-    4: (2, 6),   # turn: RIGHT -> DOWN
-    5: (4, 6),   # middle of the column-6 descent
-    6: (6, 6),   # policy-path goal
+    0: (0, 0),
+    1: (0, 1),
+    2: (2, 1),
+    3: (2, 3),
+    4: (2, 6),
+    5: (4, 6),
+    6: (6, 6),
 }
-# =================================================================
 
 GRID_SIZE = 7
 START = (0, 0)
@@ -77,38 +63,23 @@ ACTION_NAME       = {UP: 'UP', DOWN: 'DOWN', LEFT: 'LEFT', RIGHT: 'RIGHT', -1: '
 HEADING_DELTA     = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
 HEADING_NAME      = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
 
-# ===================== POLICY =====================
-# Hardcoded from value-iteration output. Indexed as policy[row, col].
-# Action codes: UP=0, DOWN=1, LEFT=2, RIGHT=3, obstacle/goal = -1.
-#
-#         col:  0   1   2   3   4   5   6
 policy = np.array([
-    [    RIGHT, DOWN, RIGHT, RIGHT, RIGHT, DOWN,  LEFT],   # row 0
-    [       -1, DOWN,    -1,    -1,    -1, DOWN,    -1],   # row 1
-    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, DOWN],  # row 2
-    [       UP,   -1,    -1,    -1,    UP,    -1, DOWN],   # row 3
-    [       UP, LEFT,  DOWN,    -1,    UP,    -1, DOWN],   # row 4
-    [       UP,   -1, RIGHT, RIGHT,    UP,    -1, DOWN],   # row 5
-    [       UP,   -1,    UP,    -1,    UP,    -1,   -1],   # row 6 (goal at 6,6)
+    [    RIGHT, DOWN, RIGHT, RIGHT, RIGHT, DOWN,  LEFT],
+    [       -1, DOWN,    -1,    -1,    -1, DOWN,    -1],
+    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, DOWN],
+    [       UP,   -1,    -1,    -1,    UP,    -1, DOWN],
+    [       UP, LEFT,  DOWN,    -1,    UP,    -1, DOWN],
+    [       UP,   -1, RIGHT, RIGHT,    UP,    -1, DOWN],
+    [       UP,   -1,    UP,    -1,    UP,    -1,   -1],
 ], dtype=int)
-# ===================================================
 
-
-# ===================== SVG MARKERS =====================
 
 def load_svg_markers(svg_dir):
-    """Scan `svg_dir` for ArUco SVGs and return (markers, aruco_dict_name).
-
-    `markers` is a list of (marker_id, file_path) sorted by id.
-    The ArUco dictionary is derived from the filenames, e.g.
-    `4x4_1000-3.svg` -> bits 4x4, 1000 markers -> 'DICT_4X4_1000'.
-    """
     markers = []
-    dict_name = 'DICT_4X4_1000'  # default if filenames can't be parsed
+    dict_name = 'DICT_4X4_1000'
     if not os.path.isdir(svg_dir):
         return markers, dict_name
 
-    # e.g. 4x4_1000-3.svg  ->  bits=4x4, size=1000, id=3
     pat = re.compile(r'(\d+)x(\d+)_(\d+)[-_](\d+)\.svg$', re.IGNORECASE)
     for path in sorted(glob.glob(os.path.join(svg_dir, '*.svg'))):
         m = pat.search(os.path.basename(path))
@@ -123,15 +94,9 @@ def load_svg_markers(svg_dir):
 
 
 def decode_svg_grid(svg_path):
-    """Parse an ArUco SVG into a 6x6 bit grid (1 = white cell, 0 = black).
-
-    The SVGs draw white <rect> cells over a 6x6 black canvas. A cell is
-    white when its centre falls inside any white rect. Best-effort: used
-    only for the startup printout so the markers can be visually checked.
-    """
     with open(svg_path, 'r') as f:
         text = f.read()
-    text = re.sub(r'\sxmlns="[^"]+"', '', text, count=1)  # drop namespace
+    text = re.sub(r'\sxmlns="[^"]+"', '', text, count=1)
     root = ET.fromstring(text)
 
     white = []
@@ -155,17 +120,13 @@ def decode_svg_grid(svg_path):
 
 
 def grid_to_ascii(grid):
-    """Render a bit grid as ASCII ('##' black, '  ' white) for logging."""
     return '\n'.join(
         '    ' + ''.join('  ' if cell else '##' for cell in row)
         for row in grid
     )
 
 
-# ===================== POLICY PATH =====================
-
 def compute_policy_path(pol, start, goal, max_len=200):
-    """Follow `pol` from `start` to `goal`, returning the ordered cells."""
     path = [start]
     seen = {start}
     pos = start
@@ -183,10 +144,7 @@ def compute_policy_path(pol, start, goal, max_len=200):
     return path
 
 
-# ===================== ARUCO =====================
-
 def _make_aruco_detector(dict_name):
-    """Build an ArUco detector; handles old (<=4.6) and new (>=4.7) APIs."""
     dict_id = getattr(cv2.aruco, dict_name, None)
     if dict_id is None:
         dict_id = cv2.aruco.DICT_4X4_1000
@@ -221,7 +179,6 @@ class PolicyRunner(Node):
 
         self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
 
-        # Camera topics on the robots are best-effort -> use sensor QoS.
         msg_type = CompressedImage if CAMERA_COMPRESSED else Image
         self.sub = self.create_subscription(
             msg_type, CAMERA_TOPIC, self.image_cb,
@@ -242,7 +199,6 @@ class PolicyRunner(Node):
         self._log_marker_map()
 
     def _log_marker_map(self):
-        """Print the SVG-marker -> policy-path-cell linkage at startup."""
         if not self.marker_to_cell:
             self.get_logger().warn(
                 f"no SVG markers loaded from {SVG_DIR} -- "
@@ -259,8 +215,6 @@ class PolicyRunner(Node):
                 f"  {fname:<18} id={mid} -> cell {cell} "
                 f"policy={ACTION_NAME[act]:<5} {tag}"
             )
-
-    # ---------- camera ----------
 
     def image_cb(self, msg):
         try:
@@ -286,11 +240,6 @@ class PolicyRunner(Node):
             self.get_logger().warn(f"image_cb failed: {e}")
 
     def observe_position(self):
-        """Return the policy-path cell of the nearest visible SVG marker.
-
-        This is the SVG -> policy-path link: a detected ArUco id is looked
-        up in MARKER_TO_CELL, whose values are all cells of the path.
-        """
         with self.frame_lock:
             frame = None if self.latest_frame is None else self.latest_frame.copy()
         if frame is None:
@@ -301,7 +250,6 @@ class PolicyRunner(Node):
         if ids is None or len(ids) == 0:
             return None
 
-        # closest-looking marker = largest area in the image
         areas = [cv2.contourArea(c.reshape(-1, 2).astype(np.float32))
                  for c in corners]
         idx = int(np.argmax(areas))
@@ -315,8 +263,6 @@ class PolicyRunner(Node):
         self.get_logger().info(
             f"saw SVG marker id={marker_id} -> policy-path cell {cell}")
         return cell
-
-    # ---------- motion ----------
 
     def publish_twist(self, linear_x, angular_z, duration):
         msg = Twist()
@@ -346,8 +292,6 @@ class PolicyRunner(Node):
         return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
                 and pos not in OBSTACLES)
 
-    # ---------- main loop ----------
-
     def run(self):
         time.sleep(1.0)
         pos = START
@@ -360,7 +304,6 @@ class PolicyRunner(Node):
                     f"*** reached goal in {step - 1} moves ***")
                 return
 
-            # --- localize first: link any visible SVG to a path cell ---
             observed = self.observe_position()
             if observed is not None and observed != pos:
                 self.get_logger().warn(
@@ -393,11 +336,9 @@ class PolicyRunner(Node):
 
 
 def main():
-    # --- 1. read the SVG files and derive the ArUco dictionary ---
     markers, aruco_dict_name = load_svg_markers(SVG_DIR)
     marker_files = {mid: path for mid, path in markers}
 
-    # --- 2. validate the FIXED marker positions against SVGs + path ---
     path = compute_policy_path(policy, START, GOAL)
     print(f"[policy_runner] loaded {len(markers)} SVG markers from {SVG_DIR}")
     print(f"[policy_runner] ArUco dictionary: {aruco_dict_name}")
@@ -418,7 +359,6 @@ def main():
             except Exception as e:
                 print(f"    (could not decode SVG: {e})")
 
-    # --- 3. run the ROS 2 node ---
     rclpy.init()
     node = PolicyRunner(MARKER_TO_CELL, marker_files, aruco_dict_name)
 

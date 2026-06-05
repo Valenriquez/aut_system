@@ -25,10 +25,10 @@ ACTIONS = {
 }
 
 GAMMA   = 0.9
-NOISE   = 0.0
+NOISE   = 0.1
 REWARD_GOAL = 100
-REWARD_STEP = -20
-REWARD_WALL = -10
+REWARD_STEP = -1
+REWARD_WALL = -100
 THRESHOLD   = 0.001
 
 
@@ -36,11 +36,7 @@ def is_free(r, c):
     return 0 <= r < ROWS and 0 <= c < COLS and GRID[r][c] != 1
 
 def get_reward(r, c):
-    if (r, c) == GOAL:
-        return REWARD_GOAL
-    elif not is_free(r, c):
-        return REWARD_WALL
-    return REWARD_STEP
+    return REWARD_GOAL if (r, c) == GOAL else REWARD_STEP
 
 def transition(r, c, action):
     dr, dc = ACTIONS[action]
@@ -58,8 +54,9 @@ def transition(r, c, action):
     for prob, (mr, mc) in outcomes:
         nr, nc = r + mr, c + mc
         if not is_free(nr, nc):
-            nr, nc = r, c
-        results.append((prob, nr, nc))
+            results.append((prob, REWARD_WALL, r, c))
+        else:
+            results.append((prob, get_reward(nr, nc), nr, nc))
     return results
 
 def value_iteration():
@@ -81,8 +78,8 @@ def value_iteration():
                 action_values = []
                 for action in ACTIONS:
                     total = 0
-                    for prob, nr, nc in transition(r, c, action):
-                        total += prob * (get_reward(nr, nc) + GAMMA * V[nr][nc])
+                    for prob, reward, nr, nc in transition(r, c, action):
+                        total += prob * (reward + GAMMA * V[nr][nc])
                     action_values.append(total)
 
                 new_V[r][c] = max(action_values)
@@ -114,8 +111,8 @@ def extract_policy(V):
 
             for action in ACTIONS:
                 total = 0
-                for prob, nr, nc in transition(r, c, action):
-                    total += prob * (get_reward(nr, nc) + GAMMA * V[nr][nc])
+                for prob, reward, nr, nc in transition(r, c, action):
+                    total += prob * (reward + GAMMA * V[nr][nc])
                 if total > best_value:
                     best_value  = total
                     best_action = action

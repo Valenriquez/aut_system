@@ -1,29 +1,3 @@
-#!/usr/bin/env python3
-"""
-policy_runner for the AlphaBot2 (ROS 2 Humble).
-
-The robot follows a hardcoded value-iteration policy across a 7x7 grid.
-The AlphaBot2 has NO wheel odometry, IMU or LiDAR (see the Lab guide), so
-the *only* source of localization is the camera.
-
-ArUco markers -- supplied as the SVG files in ./svgs -- are printed and
-taped onto FIXED cells of the policy path. This script:
-
-  1. reads the SVG files in ./svgs and derives the ArUco dictionary from
-     their filenames (4x4_1000-<id>.svg -> DICT_4X4_1000, marker id <id>);
-  2. uses MARKER_TO_CELL -- a fixed, hand-set table -- for the exact grid
-     cell on which each SVG marker is physically placed on the map;
-  3. validates that every marker cell lies on the policy path;
-  4. while running, whenever the camera sees marker N it concludes the
-     robot is standing on MARKER_TO_CELL[N] -- that fixed cell of the
-     policy path -- and (re)synchronizes its position there.
-
-So "finding an SVG" is literally mapped to "a place on the policy path".
-
-Topics (AlphaBot2):
-  camera : /camera/compressed   (sensor_msgs/msg/CompressedImage)
-  motion : /alphabot2/cmd_vel   (geometry_msgs/msg/Twist)
-"""
 import os
 import re
 import glob

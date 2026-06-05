@@ -1,26 +1,3 @@
-#!/usr/bin/env python3
-"""
-policy_runner for the AlphaBot2 (ROS 2 Humble) -- MOTION-ONLY TEST.
-
-This is the same as runnable_alphabot.py but with the SVG / ArUco / camera
-parts removed. Use it as a FIRST test: get the robot driving the policy
-correctly before adding marker-based localization.
-
-The robot follows a hardcoded value-iteration policy across a 7x7 grid by
-pure DEAD RECKONING -- it just turns and drives forward for fixed times.
-There is no camera and no position feedback, so nothing corrects drift:
-this test only checks that
-
-  * /alphabot2/cmd_vel is reaching the robot,
-  * the forward / turn directions are right, and
-  * the speed/time pairs are roughly calibrated.
-
-Once the motion looks good, switch to runnable_alphabot.py, which adds the
-ArUco SVG markers for localization.
-
-Topic (AlphaBot2):
-  motion : /alphabot2/cmd_vel   (geometry_msgs/msg/Twist)
-"""
 import time
 import math
 

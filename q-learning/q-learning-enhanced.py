@@ -292,7 +292,6 @@ def run_training():
 # =============================================================================
 #  PART 2 -- RUNNER CALIBRATION  (line-sensor-only, timed motion)
 # =============================================================================
-# ----- line sensor -----
 THRESHOLD = 700          # value < THRESHOLD => black  (sim: ~400 black, ~800/999 white)
 KP        = 0.4        # proportional steering gain (used when USE_FUZZY = False)
 WEIGHTS   = [-2, -1, 0, 1, 2]
@@ -306,23 +305,24 @@ FUZZY_OUT     = [+0.30, +0.12, 0.0, -0.12, -0.30]   # rad/s (NL steers +, PL ste
 
 # ----- [3] line-loss recovery / stuck watchdog -----
 LOST_TURN   = 0.5        # rad/s steer-back toward the last-seen side when lost
-LOST_SLOW   = 0.5        # speed fraction while searching for a lost line
+LOST_SLOW   = 0.2        # speed fraction while searching for a lost line
 LOST_GIVEUP = 1.5        # s of continuous line-loss -> stop the cell (possible trap)
 
-# ----- direction (sim = standard ROS) -----
-YAW_SIGN      = +1
-STEER_SIGN    = +1
-STRAIGHT_TRIM = 0.0
+YAW_SIGN      = +1 # If the robot steers away from the line instead of toward it 
+STEER_SIGN    = +1 # flip if  the robot steers away from the line instead of toward it
+STRAIGHT_TRIM = 0.5 #  steering to counteract a mechanical drift 
 
 # ----- motion tuning -----
 CELL_SIZE     = 0.225    # one grid cell (m) -- must match maze.sdf
 QUARTER_TURN  = math.pi / 2
-FAST_LINEAR   = 0.22     # m/s on straights
-SLOW_LINEAR   = 0.15     # m/s on the cell before a turn / near the goal
-ANGULAR_SPEED = 0.80     # rad/s for turns
-SETTLE_TIME   = 0.9      # s -- pause so the robot fully STOPS before turning
-TURN_TIME_SCALE = 1.3    # raise if turns under-rotate, lower if they overshoot
-FWD_TIME_SCALE  = 1.5    # raise if it stops SHORT of cells, lower if it overshoots
+#  the two cruise speeds, the run loop picks slow before turns (accuracy) and fast on straights (speed).
+FAST_LINEAR   = 0.22     
+SLOW_LINEAR   = 0.15   
+
+ANGULAR_SPEED = 0.80     # rotation speed for turns
+SETTLE_TIME   = 0.9      # pause  
+TURN_TIME_SCALE = 1.3    # turns under-rotate in practice
+FWD_TIME_SCALE  = 1.5    # raise if it stops short - lower otherwise
 GOAL_LINEAR    = 0.30 
 GOAL_FWD_SCALE = 1.4  
 FINAL_STEPS    = 3 

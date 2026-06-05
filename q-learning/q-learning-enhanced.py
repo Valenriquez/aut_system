@@ -1,37 +1,4 @@
 #!/usr/bin/env python3
-"""
-policy_runner_qlearning.py  -  AlphaBot2 (ROS 2 Humble)
-
-ONE FILE: learns the maze policy with Q-learning AND drives the robot with it.
-Line sensors only -- topics used are exactly:
-    /alphabot2/line_sensors   (Int32MultiArray, 5 values)
-    /alphabot2/cmd_vel        (Twist)
-
-Modes:
-    python3 q-learning.py run     # drive the learned policy (default)
-    python3 q-learning.py train   # re-derive the policy (Q-learning), save it
-
-ADDED BEHAVIOURS (all toggleable, so you can compare with the originals):
-  [4] FUZZY line-following  -- smooth steering instead of jerky proportional
-                               (USE_FUZZY).  Fewer overshoots = fewer drifts
-                               into the blocks = the practical "obstacle
-                               avoidance" [1] for a line-following robot.
-  [3] Line-loss recovery + watchdog -- steer back toward the line when lost,
-                               and stop a cell if the line stays lost too long
-                               (the line-sensor analogue of a stuck/U-trap
-                               escape; true U-trap escape needs range sensors).
-  [5] 8-SECTOR obstacle code -- obstacle_code(cell)/danger_level(cell): a bitmap
-                               of which of the 8 surrounding sectors are blocked
-                               (the "object distribution" descriptor).
-  [6] REWARD shaping        -- big goal reward, strong collision penalty,
-                               potential-based shaping toward the goal, and a
-                               danger penalty using [5].
-
-NOT implemented (needs proximity sensors this robot doesn't expose):
-  [2] Wall following, and the *reactive* parts of [1]/[3].  See notes at the
-  bottom -- tell me which proximity topics your sim publishes and I'll add them.
-"""
-
 import os
 import sys
 import math

@@ -1,141 +1,327 @@
 #!/usr/bin/env python3
 """
-line_follower.py  –  AlphaBot2 (ROS 2 Humble)
+policy_runner_v6.py  –  AlphaBot2 (ROS 2 Humble)
 
-Follows a black line using 5 IR sensors with proportional steering.
-When the line is lost, enters a recovery search instead of stopping:
-  1. Rotates toward the direction the line was last seen
-  2. If still not found after RECOVERY_TIMEOUT steps, reverses direction
-  3. Resumes normal following as soon as sensors detect the line again
+Fixes over v5 (which drove off the board):
+
+  1. STEERING SIGN REVERTED to WEIGHTS = [-2,-1,0,1,2].
+     The v5 flip caused POSITIVE feedback: the line ran off the
+     sensor array instead of being re-centered. Reverted.
+
+  2. LINE-LOSS RECOVERY (the real escape fix).
+     v5 had no recovery: when count==0 the error was None, so
+     angular.z=0 and the robot drove dead straight off the line
+     forever. Now, when the line is lost, the robot ARCS back
+     toward the side the line was last seen (slower forward +
+     turn) until it re-acquires it.
 
 Topics
   subscribe : /alphabot2/line_sensors  (std_msgs/msg/Int32MultiArray)
   publish   : /alphabot2/cmd_vel       (geometry_msgs/msg/Twist)
 """
 
+import time
+import math
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32MultiArray
 from geometry_msgs.msg import Twist
-
-# ===================== TUNING ================================
-THRESHOLD        = 700    # sensor value below this → on black line
-BASE_SPEED       = 0.12   # m/s  forward speed while following
-KP               = 0.35   # proportional steering gain
-WEIGHTS          = [-2, -1, 0, 1, 2]   # sensor positions left → right
-
-RECOVERY_ANGULAR = 0.45   # rad/s  rotation speed during search
-RECOVERY_TIMEOUT = 25     # sensor callbacks before reversing search direction
-# =============================================================
+from rclpy.qos import qos_profile_sensor_data
 
 
-class LineFollower(Node):
+# ===================== IR SENSOR TUNING =====================
+THRESHOLD      = 700
+KP             = 0.30
+WEIGHTS        = [-2, -1, 0, 1, 2]   # REVERTED (v5's flip was wrong)
+ON_LINE_COUNT  = 3      # >=3 sensors on black -> on a line
+OFF_LINE_COUNT = 1      # <=1 sensor on black  -> in white (off the line)
+
+# ── DISCRETE STEERING ────────────────────────────────────────
+# Turn rate applied when the black line is off to one side.
+# Per your sensor mapping: black on high-index side -> LEFT.
+STEER_LEFT  = +0.6    # rad/s  (positive = left / CCW in ROS)
+STEER_RIGHT = -0.6    # rad/s  (negative = right / CW)
+# If the robot turns the WRONG way on the bench, swap these two signs.
+
+# ===================== MOTION TUNING ========================
+CELL_SIZE     = 0.18        # m  <- MEASURE intersection-to-intersection pitch
+QUARTER_TURN  = math.pi / 2
+
+FAST_LINEAR   = 0.15        # m/s  straightaways (a touch slower = easier to track)
+SLOW_LINEAR   = 0.11        # m/s  cell before a turn / goal
+ANGULAR_SPEED = 0.80        # rad/s
+SETTLE_TIME   = 0.4         # s
+
+# Measured REAL ground speeds (m/s). THESE ARE STILL UNMEASURED GUESSES —
+# the timer is unreliable until you replace them with real numbers
+# (command a speed 5 s, tape-measure distance, real = distance / 5).
+REAL_SPEED = {
+    # FAST_LINEAR: 0.??,
+    # SLOW_LINEAR: 0.??,
+}
+
+ARRIVE_GATE_FRAC = 0.5
+ARRIVE_GRACE     = 0.4
+
+# ===================== GRID / WORLD =========================
+GRID_SIZE = 7
+START     = (0, 0)
+GOAL      = (6, 6)
+OBSTACLES = {
+    (1, 0), (1, 2), (1, 3), (1, 4), (1, 6),
+    (3, 1), (3, 2), (3, 3), (3, 5),
+    (4, 3), (4, 5),
+    (5, 1), (5, 5),
+    (6, 1), (6, 3), (6, 5),
+}
+
+UP, DOWN, LEFT, RIGHT = 0, 1, 2, 3
+ACTION_TO_HEADING = {UP: 0, RIGHT: 1, DOWN: 2, LEFT: 3}
+ACTION_DELTA      = {UP: (-1, 0), DOWN: (1, 0), LEFT: (0, -1), RIGHT: (0, 1)}
+HEADING_DELTA     = {0: (-1, 0), 1: (0, 1), 2: (1, 0), 3: (0, -1)}
+HEADING_NAME      = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
+
+policy = np.array([
+    [    RIGHT,  DOWN, RIGHT, RIGHT, RIGHT,  DOWN,  LEFT],
+    [       -1,  DOWN,    -1,    -1,    -1,  DOWN,    -1],
+    [    RIGHT, RIGHT, RIGHT, RIGHT, RIGHT, RIGHT,  DOWN],
+    [       UP,    -1,    -1,    -1,    UP,    -1,  DOWN],
+    [       UP,  LEFT,  DOWN,    -1,    UP,    -1,  DOWN],
+    [       UP,    -1, RIGHT, RIGHT,    UP,    -1,  DOWN],
+    [       UP,    -1,    UP,    -1,    UP,    -1,    -1],
+], dtype=int)
+
+
+def compute_policy_path(pol, start, goal, max_len=200):
+    path, seen, pos = [start], {start}, start
+    while pos != goal and len(path) < max_len:
+        action = int(pol[pos])
+        if action not in ACTION_DELTA:
+            break
+        dr, dc = ACTION_DELTA[action]
+        nxt = (pos[0] + dr, pos[1] + dc)
+        if nxt in seen:
+            break
+        path.append(nxt); seen.add(nxt); pos = nxt
+    return path
+
+
+class PolicyRunner(Node):
 
     def __init__(self):
-        super().__init__('line_follower')
-
+        super().__init__('policy_runner_v6')
+        self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
         self.sub = self.create_subscription(
             Int32MultiArray,
             '/alphabot2/line_sensors',
-            self.sensor_callback,
-            10,
+            self._sensor_cb,
+            qos_profile_sensor_data,
         )
-        self.pub = self.create_publisher(Twist, '/alphabot2/cmd_vel', 10)
+        self._sensor_data = [999, 999, 999, 999, 999]
+        self._count       = 0
+        self._on_line     = False
+        self.get_logger().info('PolicyRunner v6 ready')
 
-        # --- recovery state ---
-        self.last_error       = 0.0   # last known weighted error
-        self.search_direction = 1     # +1 = left,  -1 = right
-        self.recovery_count   = 0     # steps spent searching
-        self.recovering       = False
-
-        self.get_logger().info('Line follower started  (with recovery)')
-
-    # ──────────────────────────────────────────────
-    # SENSOR CALLBACK
-    # ──────────────────────────────────────────────
-
-    def sensor_callback(self, msg: Int32MultiArray):
-        data = list(msg.data)
-        if len(data) != 5:
+    # ── sensing ────────────────────────────────────
+    def _sensor_cb(self, msg: Int32MultiArray):
+        if len(msg.data) != 5:
             return
+        self._sensor_data = list(msg.data)
+        self._count   = sum(1 for v in self._sensor_data if v < THRESHOLD)
+        self._on_line = self._count >= ON_LINE_COUNT
+        self.get_logger().info(
+            f'raw={self._sensor_data} count={self._count}',
+            throttle_duration_sec=0.5,
+        )
 
-        binary = [1 if v < THRESHOLD else 0 for v in data]
+    def _line_error(self):
+        binary = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
         count  = sum(binary)
-
         if count == 0:
-            # line completely lost → search
-            self._recover()
-            return
+            return None
+        return sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
 
-        # ── line found ──────────────────────────────────
-        if self.recovering:
-            self.get_logger().info('Line re-acquired  → resuming follow')
-            self.recovering     = False
-            self.recovery_count = 0
-
-        # weighted lateral error
-        error = sum(WEIGHTS[i] * binary[i] for i in range(5)) / count
-
-        # remember which side the line was on (used by recovery)
-        self.last_error       = error
-        self.search_direction = 1 if error >= 0 else -1
-
-        self._follow(error)
-
-    # ──────────────────────────────────────────────
-    # NORMAL FOLLOWING
-    # ──────────────────────────────────────────────
-
-    def _follow(self, error: float):
-        """Publish forward + proportional steering command."""
-        cmd = Twist()
-        cmd.linear.x  = BASE_SPEED
-        cmd.angular.z = -KP * error
-        self.pub.publish(cmd)
-
-    # ──────────────────────────────────────────────
-    # RECOVERY (search for lost line)
-    # ──────────────────────────────────────────────
-
-    def _recover(self):
+    def _steer(self) -> float:
         """
-        Rotate in place toward the last known line position.
-        After RECOVERY_TIMEOUT steps without finding the line,
-        reverse the search direction and try the other side.
-        """
-        self.recovering      = True
-        self.recovery_count += 1
+        Discrete steering from the black/white pattern.
 
-        # flip search direction after timeout
-        if self.recovery_count > RECOVERY_TIMEOUT:
-            self.search_direction *= -1
-            self.recovery_count    = 0
-            self.get_logger().warn(
-                'Recovery timeout  → reversing search direction'
+          centered  (>=3 black, e.g. [W,B,B,B,W])  -> straight
+          black on the higher-index side           -> turn LEFT
+          black on the lower-index side            -> turn RIGHT
+          no black at all                          -> straight
+                                                      (find the next line,
+                                                       no turn-hunting)
+        """
+        b = [1 if v < THRESHOLD else 0 for v in self._sensor_data]
+        count = sum(b)
+
+        # no line: drive straight to reach the next black line
+        if count == 0:
+            return 0.0
+
+        # well-centered on the line: straight
+        if count >= ON_LINE_COUNT:
+            return 0.0
+
+        # off to one side: compare which half holds the black
+        left_side  = b[3] + b[4]   # higher-index sensors  -> "left" per your spec
+        right_side = b[0] + b[1]   # lower-index sensors   -> "right" per your spec
+
+        if left_side > right_side:
+            return STEER_LEFT
+        if right_side > left_side:
+            return STEER_RIGHT
+        return 0.0                 # tie / only center sensor -> straight
+
+    # ── primitives ─────────────────────────────────
+    def _stop(self):
+        self.pub.publish(Twist())
+
+    def _rotate(self, angular_z: float, duration: float):
+        msg = Twist()
+        msg.angular.z = angular_z
+        end = time.time() + duration
+        while time.time() < end:
+            self.pub.publish(msg)
+            rclpy.spin_once(self, timeout_sec=0.05)
+        self._stop()
+        time.sleep(SETTLE_TIME)
+
+    def _drive_one_cell(self, linear_speed: float, expected_cell=None):
+        """
+        Timing-primary, line-re-anchored, with discrete steering.
+        On the line: straight / left / right per the black pattern.
+        Line lost: go straight to reach the next black line (no turning).
+        """
+        real_speed = REAL_SPEED.get(linear_speed, linear_speed)
+        expected   = CELL_SIZE / real_speed
+        gate_time  = expected * ARRIVE_GATE_FRAC
+        hard_time  = expected + ARRIVE_GRACE
+
+        start            = time.time()
+        prev_on          = self._on_line
+        seen_white_after = False
+
+        self.get_logger().info(
+            f'  [drive] -> {expected_cell}  real={real_speed:.3f}  '
+            f'expected={expected:.2f}s'
+        )
+
+        while True:
+            elapsed = time.time() - start
+            on  = self._on_line
+            off = self._count <= OFF_LINE_COUNT
+
+            if elapsed >= gate_time:
+                if off:
+                    seen_white_after = True
+                if seen_white_after and on and not prev_on:
+                    self.get_logger().info(
+                        f'  [drive] line edge at {elapsed:.2f}s '
+                        f'-> {expected_cell} (re-anchored)'
+                    )
+                    break
+
+            if elapsed >= expected and not seen_white_after:
+                self.get_logger().info(
+                    f'  [drive] timer at {elapsed:.2f}s '
+                    f'-> {expected_cell} (continuous tape)'
+                )
+                break
+
+            if elapsed >= hard_time:
+                self.get_logger().warn(
+                    f'  [drive] hard cap at {elapsed:.2f}s '
+                    f'-> {expected_cell} (dead-reckoned)'
+                )
+                break
+
+            cmd = Twist()
+            cmd.linear.x  = linear_speed
+            cmd.angular.z = self._steer()   # discrete: straight / left / right
+            self.pub.publish(cmd)
+
+            prev_on = on
+            rclpy.spin_once(self, timeout_sec=0.04)
+
+        self._stop()
+        time.sleep(SETTLE_TIME)
+
+    def face(self, current: int, desired: int) -> int:
+        diff = (desired - current) % 4
+        if diff == 0:
+            return desired
+        dur = QUARTER_TURN / ANGULAR_SPEED
+        if diff == 1:
+            self._rotate(-ANGULAR_SPEED, dur)
+        elif diff == 2:
+            self._rotate(-ANGULAR_SPEED, 2 * dur)
+        else:
+            self._rotate(+ANGULAR_SPEED, dur)
+        return desired
+
+    # ── policy helpers ─────────────────────────────
+    def _in_bounds_and_free(self, pos) -> bool:
+        r, c = pos
+        return (0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE
+                and pos not in OBSTACLES)
+
+    def _turn_coming(self, cur, nxt) -> bool:
+        if nxt == GOAL or nxt in OBSTACLES:
+            return True
+        na = int(policy[nxt])
+        if na == -1:
+            return True
+        return na != int(policy[cur])
+
+    # ── main loop ──────────────────────────────────
+    def run(self):
+        time.sleep(1.5)
+        pos, heading = START, 0
+        self.get_logger().info(f'Start {pos}  heading {HEADING_NAME[heading]}')
+
+        for step in range(1, 100):
+            if pos == GOAL:
+                self.get_logger().info(f'*** Goal in {step-1} steps ***')
+                return
+
+            action = int(policy[pos])
+            if action == -1:
+                self.get_logger().warn(f'No action at {pos}')
+                return
+
+            heading = self.face(heading, ACTION_TO_HEADING[action])
+            dr, dc  = HEADING_DELTA[heading]
+            target  = (pos[0] + dr, pos[1] + dc)
+
+            if not self._in_bounds_and_free(target):
+                self.get_logger().warn(f'Obstacle at {target}')
+                return
+
+            linear = SLOW_LINEAR if self._turn_coming(pos, target) else FAST_LINEAR
+            tag    = 'slow' if linear == SLOW_LINEAR else 'fast'
+            self.get_logger().info(
+                f'step {step:2d}: {pos} -> {target}  '
+                f'{HEADING_NAME[heading]}  ({tag})'
             )
 
-        side = 'left' if self.search_direction > 0 else 'right'
-        self.get_logger().warn(
-            f'Line lost  → searching {side}  '
-            f'(step {self.recovery_count}/{RECOVERY_TIMEOUT})'
-        )
+            self._drive_one_cell(linear, expected_cell=target)
+            pos = target
 
-        cmd = Twist()
-        cmd.linear.x  = 0.0   # stay in place while searching
-        cmd.angular.z = RECOVERY_ANGULAR * self.search_direction
-        self.pub.publish(cmd)
+        self.get_logger().warn('Step limit reached.')
 
 
-# ────────────────────────────────────────────────────────────
 def main():
+    path = compute_policy_path(policy, START, GOAL)
+    print(f'[v6] path ({len(path)} cells): {path}')
     rclpy.init()
-    node = LineFollower()
+    node = PolicyRunner()
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        node.run()
     finally:
-        node.pub.publish(Twist())   # safety stop
+        node.pub.publish(Twist())
         node.destroy_node()
         rclpy.shutdown()
 

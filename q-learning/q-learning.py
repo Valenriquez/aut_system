@@ -5,7 +5,7 @@ Q-learning trainer for the AlphaBot2 grid maze.
 This is the OFFLINE part of the pipeline. It is plain numpy — no ROS.
 It learns a tabular Q-function on a simulated 7x7 grid MDP, extracts the
 greedy policy, validates that the policy actually reaches the goal, and
-saves it to `learned_policy.npy` for the ROS 2 runner to load.
+saves it to `learned_policy.txt` for the ROS 2 runner to load.
 
 Why offline?  Tabular Q-learning needs thousands of episodes and crashes
 into walls during exploration. You do that in a simulator (here), not on
@@ -181,8 +181,8 @@ def main():
     print('], dtype=int)')
 
     if reached:
-        np.save('learned_policy.npy', policy)
-        print('\nSaved → learned_policy.npy')
+        np.savetxt('learned_policy.txt', policy, fmt='%2d')
+        print('\nSaved → learned_policy.txt')
     else:
         print('\n!! Policy did not reach goal — increase N_EPISODES or check rewards.')
 

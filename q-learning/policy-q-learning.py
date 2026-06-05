@@ -5,10 +5,10 @@ AlphaBot2 (ROS 2 Humble) — Q-LEARNING POLICY RUNNER
 Identical motion / sensor stack to your value-iteration version. The ONLY
 change is the source of `policy`: instead of being hand-coded, it is the
 greedy policy learned offline by `qlearning_train.py` and saved to
-`learned_policy.npy`.
+`learned_policy.txt`.
 
 Run order:
-  1.  python3 qlearning_train.py      # learn + save learned_policy.npy
+  1.  python3 qlearning_train.py      # learn + save learned_policy.txt
   2.  ros2 run <pkg> policy_runner_qlearning   (or python3 this file)
 
 Two-phase checkpoint detection (white-then-black) is unchanged — the line
@@ -69,7 +69,7 @@ HEADING_NAME      = {0: 'N', 1: 'E', 2: 'S', 3: 'W'}
 # ===================== LOAD LEARNED POLICY ==================
 # Primary: load the policy learned by qlearning_train.py.
 # Fallback: the policy from the last training run (so the node still
-# works if the .npy is missing). Re-paste this from the trainer output
+# works if the .txt is missing). Re-paste this from the trainer output
 # whenever you retrain.
 _FALLBACK_POLICY = np.array([
     [ 3,  1,  3,  3,  3,  1,  2],
@@ -81,10 +81,10 @@ _FALLBACK_POLICY = np.array([
     [ 0, -1,  0, -1,  0, -1, -1],
 ], dtype=int)
 
-_POLICY_PATH = os.path.join(os.path.dirname(__file__), 'learned_policy.npy')
+_POLICY_PATH = os.path.join(os.path.dirname(__file__), 'learned_policy.txt')
 if os.path.exists(_POLICY_PATH):
-    policy = np.load(_POLICY_PATH)
-    _POLICY_SRC = 'learned_policy.npy'
+    policy = np.loadtxt(_POLICY_PATH, dtype=int)
+    _POLICY_SRC = 'learned_policy.txt'
 else:
     policy = _FALLBACK_POLICY
     _POLICY_SRC = 'embedded fallback'
